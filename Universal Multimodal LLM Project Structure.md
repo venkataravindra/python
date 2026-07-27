@@ -2608,4 +2608,325 @@ result = predictor.predict_multimodal(
 )
 
 
+4. Multimodal Storytelling
+result = predictor.predict_multimodal(
+    text="Tell a story based on these inputs",
+    image_path="path/to/image.jpg",
+    audio_path="path/to/music.wav"
+)
 
+🔧 Advanced Usage
+Custom Model Architecture
+from src.model import MultimodalLLM
+
+# Create custom model
+model = MultimodalLLM(
+    hidden_size=1024,
+    num_attention_heads=16,
+    num_hidden_layers=24,
+    vision_model="google/vit-large-patch16-224",
+    audio_model="openai/whisper-large"
+)
+
+Custom Training Loop
+
+from src.train import MultimodalTrainer
+
+trainer = MultimodalTrainer("config/config.yaml")
+trainer.setup_model()
+trainer.setup_data()
+
+for epoch in range(num_epochs):
+    train_loss = trainer.train_epoch()
+    val_loss = trainer.validate()
+    trainer.save_checkpoint(f"checkpoint_epoch_{epoch}.pt")
+
+Batch Inference
+
+from src.predict import MultimodalPredictor
+
+predictor = MultimodalPredictor("models/best_model.pt")
+
+# Process multiple inputs
+inputs = [
+    {"text": "Describe image 1", "image_path": "img1.jpg"},
+    {"text": "Describe image 2", "image_path": "img2.jpg"},
+]
+
+results = predictor.predict_batch(inputs)
+
+📈 Performance Optimization
+
+Memory Optimization
+Use gradient checkpointing for large models
+Enable mixed precision training (FP16)
+Implement gradient accumulation for large batch sizes
+Speed Optimization
+Use DataLoader with multiple workers
+Implement model parallelism for multi-GPU training
+Cache preprocessed features
+
+Model Optimization
+
+# Enable optimizations in config
+training:
+  use_amp: true                    # Mixed precision
+  gradient_checkpointing: true     # Memory optimization
+  dataloader_num_workers: 4        # Parallel data loading
+
+🐛 Troubleshooting
+Common Issues
+CUDA Out of Memory
+
+# Reduce batch size in config
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+
+Model Loading Errors
+# Check model path and permissions
+ls -la models/checkpoints/
+Data Processing Issues
+# Validate data format
+python run.py validate --config config/config.yaml
+
+
+Performance Issues
+Slow Training
+
+Enable mixed precision training
+Use multiple GPUs with DataParallel
+Increase dataloader workers
+Poor Generation Quality
+
+Increase model size
+Train for more epochs
+Adjust learning rate schedule
+🤝 Contributing
+Fork the repository
+Create a feature branch (git checkout -b feature/amazing-feature)
+Commit your changes (git commit -m 'Add amazing feature')
+Push to the branch (git push origin feature/amazing-feature)
+Open a Pull Request
+
+Development Setup
+# Install development dependencies
+pip install -r requirements.txt
+pip install pre-commit black flake8 mypy
+
+# Setup pre-commit hooks
+pre-commit install
+
+# Run tests
+pytest tests/
+
+📄 License
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+🙏 Acknowledgments
+Hugging Face Transformers
+OpenAI CLIP
+OpenAI Whisper
+PyTorch
+Gradio
+📞 Support
+📧 Email: support@multimodal-llm.com
+💬 Discord: Join our community
+🐛 Issues: GitHub Issues
+📖 Documentation: Full Documentation
+🗺️ Roadmap
+Support for more modalities (3D, sensor data)
+Real-time streaming inference
+Model compression and quantization
+Multi-language support
+Cloud deployment templates
+Advanced fine-tuning techniques
+Integration with popular ML platforms
+Made with ❤️ by the Multimodal LLM Team
+
+
+## 🧪 tests/test_model.py
+
+```python
+import pytest
+import torch
+import tempfile
+import os
+import yaml
+from PIL import Image
+import numpy as np
+
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.model import MultimodalLLM
+from src.data_processor import MultimodalDataProcessor
+from src.train import MultimodalTrainer
+
+class TestMultimodalModel:
+    
+    @pytest.fixture
+    def config(self):
+        """Test configuration"""
+        return {
+            'model': {
+                'hidden_size': 256,
+                'num_attention_heads': 4,
+                'num_hidden_layers': 2,
+                'vocab_size': 1000,
+                'max_position_embeddings': 512,
+                'vision_model': 'openai/clip-vit-base-patch32',
+                'audio_model': 'openai/whisper-tiny'
+            },
+            'training': {
+                'batch_size': 2,
+                'learning_rate': 1e-4,
+                'num_epochs': 1,
+                'warmup_steps': 10
+            },
+            'data': {
+                'max_text_length': 128,
+                'image_size': 224,
+                'audio_max_length': 10.0
+            }
+        }
+    
+    @pytest.fixture
+    def model(self, config):
+        """Create test model"""
+        return MultimodalLLM(
+            hidden_size=config['model']['hidden_size'],
+            num_attention_heads=config['model']['num_attention_heads'],
+            num_hidden_layers=config['model']['num_hidden_layers'],
+            vocab_size=config['model']['vocab_size'],
+            max_position_embeddings=config['model']['max_position_embeddings'],
+            vision_model=config['model']['vision_model'],
+            audio_model=config['model']['audio_model']
+        )
+    
+    def test_model_initialization(self, model):
+        """Test model initialization"""
+        assert model is not None
+        assert hasattr(model, 'text_encoder')
+        assert hasattr(model, 'vision_encoder')
+        assert hasattr(model, 'audio_encoder')
+        assert hasattr(model, 'fusion_module')
+        assert hasattr(model, 'decoder')
+    
+    def test_forward_pass(self, model):
+        """Test forward pass with dummy data"""
+        batch_size = 2
+        seq_length = 10
+        
+        # Create dummy inputs
+        input_ids = torch.randint(0, 1000, (batch_size, seq_length))
+        attention_mask = torch.ones(batch_size, seq_length)
+        
+        # Test text-only forward pass
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
+        
+        assert outputs.logits.shape == (batch_size, seq_length, 1000)
+    
+    def test_multimodal_forward_pass(self, model):
+        """Test forward pass with multimodal inputs"""
+        batch_size = 2
+        seq_length = 10
+        
+        # Create dummy inputs
+        input_ids = torch.randint(0, 1000, (batch_size, seq_length))
+        attention_mask = torch.ones(batch_size, seq_length)
+        
+        # Dummy image features
+        image_features = torch.randn(batch_size, 512)
+        
+        # Dummy audio features  
+        audio_features = torch.randn(batch_size, 512)
+        
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            image_features=image_features,
+            audio_features=audio_features
+        )
+        
+        assert outputs.logits.shape == (batch_size, seq_length, 1000)
+    
+    def test_generation(self, model):
+        """Test text generation"""
+        model.eval()
+        
+        input_ids = torch.randint(0, 1000, (1, 5))
+        
+        with torch.no_grad():
+            generated = model.generate(
+                input_ids=input_ids,
+                max_length=20,
+                do_sample=True,
+                temperature=0.7
+            )
+        
+        assert generated.shape[0] == 1
+        assert generated.shape[1] <= 20
+
+class TestDataProcessor:
+    
+    @pytest.fixture
+    def temp_dir(self):
+        """Create temporary directory for test data"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            yield tmp_dir
+    
+    @pytest.fixture
+    def sample_data(self, temp_dir):
+        """Create sample multimodal data"""
+        # Create sample image
+        image = Image.new('RGB', (224, 224), color='red')
+        image_path = os.path.join(temp_dir, 'test_image.jpg')
+        image.save(image_path)
+        
+        # Create sample audio (dummy)
+        audio_path = os.path.join(temp_dir, 'test_audio.wav')
+        # Note: In real tests, you'd create actual audio files
+        
+        # Create sample text data
+        data = {
+            'text': 'This is a test caption',
+            'image_path': image_path,
+            'audio_path': audio_path if os.path.exists(audio_path) else None
+        }
+        
+        return data
+    
+    def test_data_processor_initialization(self):
+        """Test data processor initialization"""
+        config = {
+            'data': {
+                'max_text_length': 128,
+                'image_size': 224,
+                'audio_max_length': 10.0
+            }
+        }
+        
+        processor = MultimodalDataProcessor(config)
+        assert processor is not None
+    
+    def test_text_processing(self, sample_data):
+        """Test text processing"""
+        config = {
+            'data': {
+                'max_text_length': 128,
+                'image_size': 224,
+                'audio_max_length': 10.0
+            }
+        }
+        
+        processor = MultimodalDataProcessor(config)
+        
+        # Test text tokenization
+        text = sample_data['text']
+        tokens = processor.tokenizer(text, return_tensors='pt', padding=True, truncation=True)
+        
+        assert '
