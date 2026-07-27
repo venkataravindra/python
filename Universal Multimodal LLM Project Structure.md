@@ -2477,4 +2477,135 @@ python demo/gradio_app.py --model_path models/checkpoints/best_model.pt
           ▼                      ▼                      ▼
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │ Text Tokenizer  │    │ Vision Encoder  │    │ Audio Encoder   │
+│                 │    │                 │    │                 │
+└─────────┬───────┘    └─────────┬───────┘    └─────────┬───────┘
+          │                      │                      │
+          └──────────┬───────────┴──────────────────────┘
+                     │
+                     ▼
+          ┌─────────────────┐
+          │ Fusion Module   │
+          │                 │
+          └─────────┬───────┘
+                    │
+                    ▼
+          ┌─────────────────┐
+          │ Transformer     │
+          │ Decoder         │
+          └─────────┬───────┘
+                    │
+                    ▼
+          ┌─────────────────┐
+          │ Text Generation │
+          │                 │
+          └─────────────────┘
+📁 Project Structure
+
+multimodal-llm/
+├── 📁 config/
+│   └── config.yaml              # Configuration file
+├── 📁 src/
+│   ├── model.py                 # Model architecture
+│   ├── data_processor.py        # Data processing
+│   ├── train.py                 # Training pipeline
+│   ├── evaluate.py              # Evaluation suite
+│   └── predict.py               # Inference engine
+├── 📁 demo/
+│   └── gradio_app.py           # Interactive demo
+├── 📁 data/
+│   ├── raw/                    # Raw multimodal data
+│   └── processed/              # Processed datasets
+├── 📁 models/
+│   ├── checkpoints/            # Training checkpoints
+│   └── pretrained/             # Pretrained models
+├── 📁 logs/                    # Training logs
+├── 📁 evaluation_results/      # Evaluation outputs
+├── 📁 outputs/                 # Generated outputs
+├── run.py                      # Main runner script
+├── requirements.txt            # Dependencies
+├── Dockerfile                  # Docker configuration
+├── docker-compose.yml          # Docker Compose
+└── README.md                   # This file
+
+⚙️ Configuration
+
+Edit config/config.yaml to customize the model:
+model:
+  hidden_size: 768
+  num_attention_heads: 12
+  num_hidden_layers: 12
+  vocab_size: 50257
+  max_position_embeddings: 2048
+  vision_model: "openai/clip-vit-base-patch32"
+  audio_model: "openai/whisper-base"
+
+training:
+  batch_size: 8
+  learning_rate: 5e-5
+  num_epochs: 10
+  warmup_steps: 1000
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+
+data:
+  max_text_length: 512
+  image_size: 224
+  audio_max_length: 30.0
+  video_fps: 1
+
+🐳 Docker Usage
+
+Build and Run
+# Build image
+docker-compose build
+
+# Run training
+docker-compose run multimodal-llm python run.py train
+
+# Start Jupyter notebook
+docker-compose up jupyter
+
+# Launch demo
+docker-compose up gradio-demo
+
+GPU Support
+Ensure NVIDIA Docker runtime is installed:
+# Install nvidia-docker2
+curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+sudo apt-get update && sudo apt-get install -y nvidia-docker2
+sudo systemctl restart docker
+
+📊 Evaluation Metrics
+The model is evaluated using multiple metrics:
+
+Perplexity: Language modeling quality
+BLEU Score: Text generation quality
+Diversity Scores: Output variety (n-gram diversity)
+Modality Impact: Cross-modal understanding
+Generation Quality: Fluency and coherence
+
+🎯 Use Cases
+1. Visual Question Answering
+
+result = predictor.predict_multimodal(
+    text="What objects are in this image?",
+    image_path="path/to/image.jpg"
+)
+
+2. Audio Description
+result = predictor.predict_multimodal(
+    text="Describe the audio content",
+    audio_path="path/to/audio.wav"
+)
+
+3. Video Summarization
+
+result = predictor.predict_multimodal(
+    text="Summarize this video",
+    video_path="path/to/video.mp4"
+)
+
+
 
