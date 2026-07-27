@@ -894,4 +894,721 @@ class MultimodalLLM(nn.Module):
             
             return generated
 
+🏋️ train.py
+
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import yaml
+import os
+import wandb
+from tqdm import tqdm
+from typing import Dict, Any
+import json
+from datetime import datetime
+
+from model import MultimodalLLM
+from dataset import create_dataloaders, CollateFunction
+from tokenizer import MultimodalTokenizer
+
+class MultimodalTrainer:
+    def __init__(self, config_path: str = "config/config.yaml"):
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+        
+        # Initialize model
+        self.model = MultimodalLLM(config_path).to(self.device)
+        self.tokenizer = MultimodalTokenizer(config_path)
+        
+        # Update model vocab size to match tokenizer
+        vocab_size = self.tokenizer.get_vocab_size()
+        self.model.text_model.resize_token_embeddings(vocab_size)
+        self.model.output_proj = nn.Linear(
+            self.config['model']['hidden_size'], 
+            vocab_size
+        ).to(self.device)
+        
+        # Initialize optimizer and scheduler
+        self.optimizer = AdamW(
+            self.model.parameters(),
+            lr=self.config['training']['learning_rate'],
+            weight_decay=self.config['training']['weight_decay']
+        )
+        
+        self.scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=self.config['training']['epochs']
+        )
+        
+        # Create dataloaders
+        dataloaders = create_dataloaders(config_path)
+        self.train_loader = dataloaders['train']
+        self.val_loader = dataloaders['val']
+        self.test_loader = dataloaders['test']
+        
+        # Set custom collate function
+        collate_fn = CollateFunction()
+        self.train_loader.collate_fn = collate_fn
+        self.val_loader.collate_fn = collate_fn
+        self.test_loader.collate_fn = collate_fn
+        
+        # Initialize wandb
+        wandb.init(
+            project="multimodal-llm",
+            config=self.config,
+            name=f"multimodal_llm_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        
+        # Create directories
+        os.makedirs(self.config['paths']['model_dir'], exist_ok=True)
+        os.makedirs(self.config['paths']['logs_dir'], exist_ok=True)
+        
+        self.global_step = 0
+        self.best_val_loss = float('inf')
+    
+    def train_epoch(self) -> Dict[str, float]:
+        """Train for one epoch"""
+        self.model.train()
+        total_loss = 0
+        num_batches = 0
+        
+        progress_bar = tqdm(self.train_loader, desc="Training")
+        
+        for batch in progress_bar:
+            # Move batch to device
+            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                    for k, v in batch.items()}
+            
+            # Forward pass
+            outputs = self.model(**batch)
+            loss = outputs['loss']
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            
+            self.optimizer.step()
+            
+            # Update metrics
+            total_loss += loss.item()
+            num_batches += 1
+            self.global_step += 1
+            
+            # Update progress bar
+            progress_bar.set_postfix({
+                'loss': f"{loss.item():.4f}",
+                'avg_loss': f"{total_loss/num_batches:.4f}"
+            })
+            
+            # Log to wandb
+            if self.global_step % 100 == 0:
+                wandb.log({
+                    'train/loss': loss.item(),
+                    'train/learning_rate': self.optimizer.param_groups[0]['lr'],
+                    'global_step': self.global_step
+                })
+            
+            # Save checkpoint
+            if self.global_step % self.config['training']['save_steps'] == 0:
+                self.save_checkpoint(f"checkpoint_step_{self.global_step}")
+        
+        return {'train_loss': total_loss / num_batches}
+    
+    def validate(self) -> Dict[str, float]:
+        """Validate the model"""
+        self.model.eval()
+        total_loss = 0
+        num_batches = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(self.val_loader, desc="Validation"):
+                # Move batch to device
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                        for k, v in batch.items()}
+                
+                # Forward pass
+                outputs = self.model(**batch)
+                loss = outputs['loss']
+                
+                total_loss += loss.item()
+                num_batches += 1
+        
+        avg_loss = total_loss / num_batches
+        return {'val_loss': avg_loss}
+    
+    def train(self):
+        """Main training loop"""
+        print("Starting training...")
+        
+        for epoch in range(self.config['training']['epochs']):
+            print(f"\nEpoch {epoch + 1}/{self.config['training']['epochs']}")
+            
+            # Train
+            train_metrics = self.train_epoch()
+            
+            # Validate
+            val_metrics = self.validate()
+            
+            # Update scheduler
+            self.scheduler.step()
+            
+            # Log metrics
+            metrics = {**train_metrics, **val_metrics, 'epoch': epoch + 1}
+            wandb.log(metrics)
+            
+            print(f"Train Loss: {train_metrics['train_loss']:.4f}")
+            print(f"Val Loss: {val_metrics['val_loss']:.4f}")
+            
+            # Save best model
+            if val_metrics['val_loss'] < self.best_val_loss:
+                self.best_val_loss = val_metrics['val_loss']
+                self.save_checkpoint("best_model")
+                print("Saved new best model!")
+            
+            # Save epoch checkpoint
+            self.save_checkpoint(f"epoch_{epoch + 1}")
+        
+        print("Training completed!")
+    
+    def save_checkpoint(self, name: str):
+        """Save model checkpoint"""
+        checkpoint = {
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'global_step': self.global_step,
+            'best_val_loss': self.best_val_loss,
+            'config': self.config
+        }
+        
+        checkpoint_path = os.path.join(self.config['paths']['model_dir'], f"{name}.pt")
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Checkpoint saved: {checkpoint_path}")
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load model checkpoint"""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        self.global_step = checkpoint['global_step']
+        self.best_val_loss = checkpoint['best_val_loss']
+        
+        print(f"Checkpoint loaded: {checkpoint_path}")
+
+def main():
+    """Main training function"""
+    trainer = MultimodalTrainer()
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+
+🔮 predict.py
+
+import torch
+import yaml
+import os
+import argparse
+from typing import Dict, Any, Optional, Union
+import json
+from PIL import Image
+import numpy as np
+
+from model import MultimodalLLM
+from tokenizer import MultimodalTokenizer
+from utils.data_processors import MultimodalDataProcessor
+
+class MultimodalPredictor:
+    def __init__(self, 
+                 model_path: str,
+                 config_path: str = "config/config.yaml"):
+        
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Initialize components
+        self.tokenizer = MultimodalTokenizer(config_path)
+        self.processor = MultimodalDataProcessor(self.config)
+        self.model = MultimodalLLM(config_path).to(self.device)
+        
+        # Load trained model
+        self.load_model(model_path)
+        self.model.eval()
+    
+    def load_model(self, model_path: str):
+        """Load trained model weights"""
+        checkpoint = torch.load(model_path, map_location=self.device)
+        
+        if 'model_state_dict' in checkpoint:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.model.load_state_dict(checkpoint)
+        
+        print(f"Model loaded from: {model_path}")
+    
+    def predict_from_file(self, 
+                         file_path: str,
+                         prompt: str = "",
+                         max_length: int = 100,
+                         temperature: float = 0.7,
+                         top_p: float = 0.9) -> str:
+        """Generate text from a file input"""
+        
+        # Process the file
+        processed_data = self.processor.process_file(file_path)
+        
+        # Combine with prompt
+        if prompt:
+            processed_data['text'] = f"{prompt} {processed_data['text']}"
+        
+        return self.predict_from_data(processed_data, max_length, temperature, top_p)
+    
+    def predict_from_data(self,
+                         data: Dict[str, Any],
+                         max_length: int = 100,
+                         temperature: float = 0.7,
+                         top_p: float = 0.9) -> str:
+        """Generate text from processed data"""
+        
+        # Tokenize input
+        encoded_data = self.tokenizer.encode_multimodal(data)
+        
+        # Move to device and add batch dimension
+        batch = {}
+        for key, value in encoded_data.items():
+            if isinstance(value, torch.Tensor):
+                batch[key] = value.unsqueeze(0).to(self.device)
+        
+        # Generate
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                input_ids=batch['input_ids'],
+                attention_mask=batch['attention_mask'],
+                image=batch.get('image'),
+                audio=batch.get('audio'),
+                video=batch.get('video'),
+                max_length=max_length,
+                temperature=temperature,
+                top_p=top_p
+            )
+        
+        # Decode generated text
+        generated_text = self.tokenizer.decode_text(generated_ids[0])
+        
+        # Remove input text from output
+        input_text = self.tokenizer.decode_text(batch['input_ids'][0])
+        if generated_text.startswith(input_text):
+            generated_text = generated_text[len(input_text):].strip()
+        
+        return generated_text
+    
+    def predict_multimodal(self,
+                          text: str = "",
+                          image_path: Optional[str] = None,
+                          audio_path: Optional[str] = None,
+                          video_path: Optional[str] = None,
+                          max_length: int = 100,
+                          temperature: float = 0.7,
+                          top_p: float = 0.9) -> str:
+        """Generate text from multimodal inputs"""
+        
+                data = {'text': text, 'image': None, 'audio': None, 'video': None}
+        
+        # Process each modality
+        if image_path and os.path.exists(image_path):
+            image_data = self.processor.process_file(image_path, 'image')
+            data['image'] = image_data['image']
+        
+        if audio_path and os.path.exists(audio_path):
+            audio_data = self.processor.process_file(audio_path, 'audio')
+            data['audio'] = audio_data['audio']
+        
+        if video_path and os.path.exists(video_path):
+            video_data = self.processor.process_file(video_path, 'video')
+            data['video'] = video_data['video']
+        
+        return self.predict_from_data(data, max_length, temperature, top_p)
+    
+    def batch_predict(self, 
+                     file_paths: list,
+                     prompts: Optional[list] = None,
+                     max_length: int = 100,
+                     temperature: float = 0.7,
+                     top_p: float = 0.9) -> list:
+        """Predict on multiple files"""
+        
+        if prompts is None:
+            prompts = [""] * len(file_paths)
+        
+        results = []
+        for file_path, prompt in zip(file_paths, prompts):
+            try:
+                result = self.predict_from_file(
+                    file_path, prompt, max_length, temperature, top_p
+                )
+                results.append({
+                    'file_path': file_path,
+                    'prompt': prompt,
+                    'prediction': result,
+                    'status': 'success'
+                })
+            except Exception as e:
+                results.append({
+                    'file_path': file_path,
+                    'prompt': prompt,
+                    'prediction': None,
+                    'status': 'error',
+                    'error': str(e)
+                })
+        
+        return results
+
+def main():
+    parser = argparse.ArgumentParser(description="Multimodal LLM Prediction")
+    parser.add_argument("--model_path", required=True, help="Path to trained model")
+    parser.add_argument("--config_path", default="config/config.yaml", help="Path to config file")
+    parser.add_argument("--input_file", help="Input file path")
+    parser.add_argument("--text", help="Input text")
+    parser.add_argument("--image", help="Input image path")
+    parser.add_argument("--audio", help="Input audio path")
+    parser.add_argument("--video", help="Input video path")
+    parser.add_argument("--prompt", default="", help="Text prompt")
+    parser.add_argument("--max_length", type=int, default=100, help="Maximum generation length")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Generation temperature")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p sampling parameter")
+    parser.add_argument("--output_file", help="Output file path")
+    
+    args = parser.parse_args()
+    
+    # Initialize predictor
+    predictor = MultimodalPredictor(args.model_path, args.config_path)
+    
+    # Generate prediction
+    if args.input_file:
+        result = predictor.predict_from_file(
+            args.input_file,
+            args.prompt,
+            args.max_length,
+            args.temperature,
+            args.top_p
+        )
+    else:
+        result = predictor.predict_multimodal(
+            text=args.text or "",
+            image_path=args.image,
+            audio_path=args.audio,
+            video_path=args.video,
+            max_length=args.max_length,
+            temperature=args.temperature,
+            top_p=args.top_p
+        )
+    
+    # Output result
+    print("Generated Text:")
+    print(result)
+    
+    if args.output_file:
+        with open(args.output_file, 'w') as f:
+            f.write(result)
+        print(f"Result saved to: {args.output_file}")
+
+if __name__ == "__main__":
+    main()
+
+🧪 evaluate.py
+
+import torch
+import yaml
+import os
+import json
+from tqdm import tqdm
+from typing import Dict, List, Any
+import numpy as np
+from sklearn.metrics import accuracy_score, f1_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from model import MultimodalLLM
+from dataset import create_dataloaders
+from tokenizer import MultimodalTokenizer
+from predict import MultimodalPredictor
+
+class MultimodalEvaluator:
+    def __init__(self, 
+                 model_path: str,
+                 config_path: str = "config/config.yaml"):
+        
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Initialize components
+        self.predictor = MultimodalPredictor(model_path, config_path)
+        self.tokenizer = MultimodalTokenizer(config_path)
+        
+        # Create test dataloader
+        dataloaders = create_dataloaders(config_path)
+        self.test_loader = dataloaders['test']
+    
+    def evaluate_perplexity(self) -> float:
+        """Calculate perplexity on test set"""
+        self.predictor.model.eval()
+        total_loss = 0
+        total_tokens = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(self.test_loader, desc="Calculating perplexity"):
+                # Move batch to device
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                        for k, v in batch.items()}
+                
+                outputs = self.predictor.model(**batch)
+                loss = outputs['loss']
+                
+                # Count tokens (excluding padding)
+                mask = batch['attention_mask']
+                num_tokens = mask.sum().item()
+                
+                total_loss += loss.item() * num_tokens
+                total_tokens += num_tokens
+        
+        avg_loss = total_loss / total_tokens
+        perplexity = torch.exp(torch.tensor(avg_loss)).item()
+        
+        return perplexity
+    
+    def evaluate_generation_quality(self, 
+                                   num_samples: int = 100,
+                                   max_length: int = 50) -> Dict[str, float]:
+        """Evaluate generation quality metrics"""
+        
+        generated_texts = []
+        reference_texts = []
+        
+        # Generate samples
+        count = 0
+        for batch in tqdm(self.test_loader, desc="Generating samples"):
+            if count >= num_samples:
+                break
+            
+            batch_size = batch['input_ids'].size(0)
+            
+            for i in range(min(batch_size, num_samples - count)):
+                # Prepare input (first half of sequence)
+                input_ids = batch['input_ids'][i]
+                seq_len = input_ids.size(0)
+                split_point = seq_len // 2
+                
+                input_part = input_ids[:split_point]
+                reference_part = input_ids[split_point:]
+                
+                # Create input data
+                input_data = {
+                    'text': self.tokenizer.decode_text(input_part),
+                    'image': batch.get('image', [None])[i] if batch.get('image') is not None else None,
+                    'audio': batch.get('audio', [None])[i] if batch.get('audio') is not None else None,
+                    'video': batch.get('video', [None])[i] if batch.get('video') is not None else None
+                }
+                
+                # Generate
+                generated_text = self.predictor.predict_from_data(
+                    input_data, max_length=max_length
+                )
+                reference_text = self.tokenizer.decode_text(reference_part)
+                
+                generated_texts.append(generated_text)
+                reference_texts.append(reference_text)
+                
+                count += 1
+                if count >= num_samples:
+                    break
+        
+        # Calculate metrics
+        metrics = self._calculate_text_metrics(generated_texts, reference_texts)
+        
+        return metrics
+    
+    def _calculate_text_metrics(self, 
+                               generated_texts: List[str], 
+                               reference_texts: List[str]) -> Dict[str, float]:
+        """Calculate text generation metrics"""
+        
+        # BLEU score (simplified)
+        bleu_scores = []
+        for gen, ref in zip(generated_texts, reference_texts):
+            gen_tokens = set(gen.lower().split())
+            ref_tokens = set(ref.lower().split())
+            
+            if len(ref_tokens) == 0:
+                bleu_scores.append(0.0)
+            else:
+                overlap = len(gen_tokens.intersection(ref_tokens))
+                bleu_scores.append(overlap / len(ref_tokens))
+        
+        # Length statistics
+        gen_lengths = [len(text.split()) for text in generated_texts]
+        ref_lengths = [len(text.split()) for text in reference_texts]
+        
+        # Diversity (unique n-grams)
+        all_generated = " ".join(generated_texts)
+        tokens = all_generated.lower().split()
+        
+        unigrams = set(tokens)
+        bigrams = set(zip(tokens[:-1], tokens[1:]))
+        trigrams = set(zip(tokens[:-2], tokens[1:-1], tokens[2:]))
+        
+        diversity_1 = len(unigrams) / len(tokens) if len(tokens) > 0 else 0
+        diversity_2 = len(bigrams) / len(tokens) if len(tokens) > 1 else 0
+        diversity_3 = len(trigrams) / len(tokens) if len(tokens) > 2 else 0
+        
+        return {
+            'bleu_score': np.mean(bleu_scores),
+            'avg_gen_length': np.mean(gen_lengths),
+            'avg_ref_length': np.mean(ref_lengths),
+            'length_ratio': np.mean(gen_lengths) / np.mean(ref_lengths) if np.mean(ref_lengths) > 0 else 0,
+            'diversity_1': diversity_1,
+            'diversity_2': diversity_2,
+            'diversity_3': diversity_3
+        }
+    
+    def evaluate_modality_impact(self, num_samples: int = 50) -> Dict[str, Dict[str, float]]:
+        """Evaluate impact of different modalities"""
+        
+        results = {
+            'text_only': [],
+            'text_image': [],
+            'text_audio': [],
+            'text_video': [],
+            'all_modalities': []
+        }
+        
+        count = 0
+        for batch in tqdm(self.test_loader, desc="Evaluating modality impact"):
+            if count >= num_samples:
+                break
+            
+            batch_size = batch['input_ids'].size(0)
+            
+            for i in range(min(batch_size, num_samples - count)):
+                # Prepare base input
+                input_ids = batch['input_ids'][i]
+                text = self.tokenizer.decode_text(input_ids[:len(input_ids)//2])
+                
+                image = batch.get('image', [None])[i] if batch.get('image') is not None else None
+                audio = batch.get('audio', [None])[i] if batch.get('audio') is not None else None
+                video = batch.get('video', [None])[i] if batch.get('video') is not None else None
+                
+                # Test different modality combinations
+                combinations = {
+                    'text_only': {'text': text, 'image': None, 'audio': None, 'video': None},
+                    'text_image': {'text': text, 'image': image, 'audio': None, 'video': None},
+                    'text_audio': {'text': text, 'image': None, 'audio': audio, 'video': None},
+                    'text_video': {'text': text, 'image': None, 'audio': None, 'video': video},
+                    'all_modalities': {'text': text, 'image': image, 'audio': audio, 'video': video}
+                }
+                
+                for combo_name, combo_data in combinations.items():
+                    try:
+                        generated = self.predictor.predict_from_data(combo_data, max_length=30)
+                        results[combo_name].append(len(generated.split()))
+                    except:
+                        results[combo_name].append(0)
+                
+                count += 1
+                if count >= num_samples:
+                    break
+        
+        # Calculate statistics
+        stats = {}
+        for combo_name, lengths in results.items():
+            stats[combo_name] = {
+                'avg_length': np.mean(lengths),
+                'std_length': np.std(lengths),
+                'min_length': np.min(lengths),
+                'max_length': np.max(lengths)
+            }
+        
+        return stats
+    
+    def generate_evaluation_report(self, output_dir: str = "evaluation_results"):
+        """Generate comprehensive evaluation report"""
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        print("Starting comprehensive evaluation...")
+        
+        # 1. Perplexity
+        print("Calculating perplexity...")
+        perplexity = self.evaluate_perplexity()
+        
+        # 2. Generation quality
+        print("Evaluating generation quality...")
+        generation_metrics = self.evaluate_generation_quality()
+        
+        # 3. Modality impact
+        print("Evaluating modality impact...")
+        modality_impact = self.evaluate_modality_impact()
+        
+        # Compile results
+        results = {
+            'perplexity': perplexity,
+            'generation_metrics': generation_metrics,
+            'modality_impact': modality_impact,
+            'model_config': self.config
+        }
+        
+        # Save results
+        with open(os.path.join(output_dir, 'evaluation_results.json'), 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        # Generate plots
+        self._generate_plots(results, output_dir)
+        
+        # Generate summary report
+        self._generate_summary_report(results, output_dir)
+        
+        print(f"Evaluation complete! Results saved to {output_dir}")
+        
+        return results
+    
+    def _generate_plots(self, results: Dict, output_dir: str):
+        """Generate evaluation plots"""
+        
+        # Modality impact plot
+        modality_data = results['modality_impact']
+        modalities = list(modality_data.keys())
+        avg_lengths = [modality_data[mod]['avg_length'] for mod in modalities]
+        
+        plt.figure(figsize=(10, 6))
+        bars = plt.bar(modalities, avg_lengths)
+        plt.title('Average Generation Length by Modality Combination')
+        plt.xlabel('Modality Combination')
+        plt.ylabel('Average Length (words)')
+        plt.xticks(rotation=45)
+        
+        # Add value labels on bars
+        for bar, length in zip(bars, avg_lengths):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+                    f'{length:.1f}', ha='center', va='bottom')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'modality_impact.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Generation metrics plot
+        gen_metrics = results['generation_metrics']
+        metrics_to_plot
+
 
