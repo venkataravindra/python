@@ -1977,5 +1977,504 @@ Examples:
 if __name__ == "__main__":
     main()
 
+## 📋 requirements.txt 
 
+```txt
+# Core ML libraries
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+tokenizers>=0.13.0
+
+# Computer Vision
+opencv-python>=4.8.0
+Pillow>=9.5.0
+timm>=0.9.0
+
+# Audio Processing
+librosa>=0.10.0
+soundfile>=0.12.0
+whisper-openai>=20230314
+
+# Video Processing
+moviepy>=1.0.3
+decord>=0.6.0
+
+# Data Processing
+datasets>=2.12.0
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Configuration and Utilities
+PyYAML>=6.0
+tqdm>=4.65.0
+wandb>=0.15.0
+tensorboard>=2.13.0
+
+# Evaluation and Metrics
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+nltk>=3.8.0
+rouge-score>=0.1.2
+
+# Web Interface (optional)
+gradio>=3.35.0
+streamlit>=1.24.0
+
+# Development and Testing
+pytest>=7.4.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.4.0
+
+# Optimization
+accelerate>=0.20.0
+deepspeed>=0.9.0
+bitsandbytes>=0.39.0
+
+# Additional utilities
+requests>=2.31.0
+jsonlines>=3.1.0
+rich>=13.4.0
+click>=8.1.0
+```
+
+## 🐳 Dockerfile
+
+```dockerfile
+FROM nvidia/cuda:11.8-devel-ubuntu20.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.9 \
+    python3.9-pip \
+    python3.9-dev \
+    git \
+    wget \
+    curl \
+    vim \
+    htop \
+    tmux \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libglib2.0-0 \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create symbolic link for python
+RUN ln -s /usr/bin/python3.9 /usr/bin/python
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy project files
+COPY . .
+
+# Create necessary directories
+RUN mkdir -p data/raw data/processed models/checkpoints models/pretrained logs evaluation_results outputs
+
+# Set permissions
+RUN chmod +x run.py
+
+# Expose ports for Jupyter/Gradio
+EXPOSE 8888 7860
+
+# Default command
+CMD ["python", "run.py", "--help"]
+```
+
+## 🐳 docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  multimodal-llm:
+    build: .
+    container_name: multimodal-llm
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./evaluation_results:/app/evaluation_results
+      - ./outputs:/app/outputs
+      - ./config:/app/config
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - HF_TOKEN=${HF_TOKEN}
+    runtime: nvidia
+    shm_size: '16gb'
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  jupyter:
+    build: .
+    container_name: multimodal-llm-jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./:/app
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    runtime: nvidia
+    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token=''
+
+  gradio-demo:
+    build: .
+    container_name: multimodal-llm-demo
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./:/app
+      - ./models:/app/models
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    runtime: nvidia
+    command: python demo/gradio_app.py
+```
+
+## 🎯 demo/gradio_app.py
+
+```python
+import gradio as gr
+import os
+import sys
+import torch
+from PIL import Image
+import tempfile
+
+# Add parent directory to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from predict import MultimodalPredictor
+
+class MultimodalDemo:
+    def __init__(self, model_path: str, config_path: str = "config/config.yaml"):
+        self.predictor = MultimodalPredictor(model_path, config_path)
+        
+    def predict_multimodal(self, 
+                          text_input: str,
+                          image_input,
+                          audio_input,
+                          video_input,
+                          max_length: int = 100,
+                          temperature: float = 0.7,
+                          top_p: float = 0.9):
+        """Process multimodal inputs and generate response"""
+        
+        try:
+            # Handle file inputs
+            image_path = None
+            audio_path = None
+            video_path = None
+            
+            if image_input is not None:
+                # Save uploaded image to temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                    if isinstance(image_input, str):
+                        image_path = image_input
+                    else:
+                        image_input.save(tmp.name)
+                        image_path = tmp.name
+            
+            if audio_input is not None:
+                audio_path = audio_input
+            
+            if video_input is not None:
+                video_path = video_input
+            
+            # Generate response
+            result = self.predictor.predict_multimodal(
+                text=text_input or "",
+                image_path=image_path,
+                audio_path=audio_path,
+                video_path=video_path,
+                max_length=max_length,
+                temperature=temperature,
+                top_p=top_p
+            )
+            
+            # Clean up temporary files
+            if image_path and image_path.startswith('/tmp'):
+                try:
+                    os.unlink(image_path)
+                except:
+                    pass
+            
+            return result
+            
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+def create_demo(model_path: str):
+    """Create Gradio interface"""
+    
+    demo_instance = MultimodalDemo(model_path)
+    
+    with gr.Blocks(title="Multimodal LLM Demo", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("""
+        # 🤖 Multimodal Large Language Model Demo
+        
+        Upload images, audio, video, or enter text to interact with the multimodal AI model.
+        The model can understand and respond to multiple types of input simultaneously.
+        """)
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown("### 📝 Inputs")
+                
+                text_input = gr.Textbox(
+                    label="Text Input",
+                    placeholder="Enter your text prompt here...",
+                    lines=3
+                )
+                
+                image_input = gr.Image(
+                    label="Image Input",
+                    type="pil"
+                )
+                
+                audio_input = gr.Audio(
+                    label="Audio Input",
+                    type="filepath"
+                )
+                
+                video_input = gr.Video(
+                    label="Video Input"
+                )
+                
+                with gr.Row():
+                    max_length = gr.Slider(
+                        minimum=10,
+                        maximum=500,
+                        value=100,
+                        step=10,
+                        label="Max Length"
+                    )
+                    
+                    temperature = gr.Slider(
+                        minimum=0.1,
+                        maximum=2.0,
+                        value=0.7,
+                        step=0.1,
+                        label="Temperature"
+                    )
+                    
+                    top_p = gr.Slider(
+                        minimum=0.1,
+                        maximum=1.0,
+                        value=0.9,
+                        step=0.05,
+                        label="Top-p"
+                    )
+                
+                generate_btn = gr.Button("🚀 Generate Response", variant="primary")
+                clear_btn = gr.Button("🗑️ Clear All", variant="secondary")
+            
+            with gr.Column(scale=1):
+                gr.Markdown("### 🎯 Output")
+                
+                output_text = gr.Textbox(
+                    label="Generated Response",
+                    lines=15,
+                    max_lines=20
+                )
+        
+        # Example inputs
+        gr.Markdown("### 📚 Example Prompts")
+        
+        examples = [
+            ["Describe what you see in this image", None, None, None, 100, 0.7, 0.9],
+            ["What is the main topic of this audio?", None, None, None, 80, 0.8, 0.9],
+            ["Summarize the content of this video", None, None, None, 150, 0.6, 0.9],
+            ["Tell me a story about", None, None, None, 200, 0.9, 0.9],
+        ]
+        
+        gr.Examples(
+            examples=examples,
+            inputs=[text_input, image_input, audio_input, video_input, max_length, temperature, top_p],
+            outputs=output_text,
+            fn=demo_instance.predict_multimodal,
+            cache_examples=False
+        )
+        
+        # Event handlers
+        generate_btn.click(
+            fn=demo_instance.predict_multimodal,
+            inputs=[text_input, image_input, audio_input, video_input, max_length, temperature, top_p],
+            outputs=output_text
+        )
+        
+        clear_btn.click(
+            fn=lambda: ("", None, None, None, ""),
+            outputs=[text_input, image_input, audio_input, video_input, output_text]
+        )
+        
+        # Additional information
+        with gr.Accordion("ℹ️ Model Information", open=False):
+            gr.Markdown(f"""
+            **Model Path:** `{model_path}`
+            
+            **Supported Inputs:**
+            - 📝 Text: Any text prompt or question
+            - 🖼️ Images: JPEG, PNG, WebP formats
+            - 🎵 Audio: WAV, MP3, FLAC formats  
+            - 🎬 Video: MP4, AVI, MOV formats
+            
+            **Parameters:**
+            - **Max Length:** Maximum number of tokens to generate
+            - **Temperature:** Controls randomness (higher = more creative)
+            - **Top-p:** Controls diversity (lower = more focused)
+            """)
+    
+    return demo
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Multimodal LLM Gradio Demo")
+    parser.add_argument("--model_path", required=True, help="Path to trained model")
+    parser.add_argument("--config_path", default="config/config.yaml", help="Path to config file")
+    parser.add_argument("--host", default="0.0.0.0", help="Host address")
+    parser.add_argument("--port", type=int, default=7860, help="Port number")
+    parser.add_argument("--share", action="store_true", help="Create public link")
+    
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.model_path):
+        print(f"❌ Model not found at: {args.model_path}")
+        print("Please train a model first or provide correct model path")
+        return
+    
+    print(f"🚀 Starting Gradio demo...")
+    print(f"📁 Model: {args.model_path}")
+    print(f"🌐 Host: {args.host}:{args.port}")
+    
+    demo = create_demo(args.model_path)
+    
+    demo.launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        show_error=True
+    )
+
+if __name__ == "__main__":
+    main()
+```
+
+## 📖 README.md
+
+```markdown
+# 🤖 Multimodal Large Language Model
+
+A comprehensive implementation of a multimodal large language model that can process and generate responses from text, images, audio, and video inputs.
+
+## 🌟 Features
+
+- **Multimodal Understanding**: Process text, images, audio, and video simultaneously
+- **Flexible Architecture**: Modular design with configurable components
+- **Easy Training**: Comprehensive training pipeline with monitoring
+- **Evaluation Suite**: Built-in evaluation metrics and analysis tools
+- **Interactive Demo**: Gradio-based web interface for testing
+- **Production Ready**: Docker support and optimized inference
+
+## 🚀 Quick Start
+
+### 1. Setup Environment
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/multimodal-llm.git
+cd multimodal-llm
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Setup project structure
+python run.py setup
+```
+
+### 2. Prepare Data
+
+```bash
+# Place your multimodal data in the data/raw directory
+# Supported formats:
+# - Images: JPEG, PNG, WebP
+# - Audio: WAV, MP3, FLAC
+# - Video: MP4, AVI, MOV
+# - Text: TXT, JSON
+
+# Process data
+python data_processor.py --input_dir data/raw --output_dir data/processed
+```
+
+### 3. Train Model
+
+```bash
+# Start training
+python run.py train --config config/config.yaml
+
+# Resume from checkpoint
+python run.py train --config config/config.yaml --resume models/checkpoints/checkpoint_step_1000.pt
+```
+
+### 4. Evaluate Model
+
+```bash
+# Run comprehensive evaluation
+python run.py evaluate --model models/checkpoints/best_model.pt --output evaluation_results
+```
+
+### 5. Run Inference
+
+```bash
+# Text + Image
+python run.py predict --model models/checkpoints/best_model.pt \
+    --text "Describe this image" --image path/to/image.jpg
+
+# Multimodal input
+python run.py predict --model models/checkpoints/best_model.pt \
+    --text "What's happening here?" \
+    --image path/to/image.jpg \
+    --audio path/to/audio.wav
+```
+
+### 6. Launch Demo
+
+```bash
+# Start Gradio interface
+python demo/gradio_app.py --model_path models/checkpoints/best_model.pt
+```
+
+## 🏗️ Architecture
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Text Input    │    │  Image Input    │    │  Audio Input    │
+│                 │    │                 │    │                 │
+└─────────┬───────┘    └─────────┬───────┘    └─────────┬───────┘
+          │                      │                      │
+          ▼                      ▼                      ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│ Text Tokenizer  │    │ Vision Encoder  │    │ Audio Encoder   │
 
