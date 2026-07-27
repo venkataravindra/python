@@ -1609,6 +1609,373 @@ class MultimodalEvaluator:
         
         # Generation metrics plot
         gen_metrics = results['generation_metrics']
-        metrics_to_plot
+                # Generation metrics plot
+        gen_metrics = results['generation_metrics']
+        metrics_to_plot = ['bleu_score', 'diversity_1', 'diversity_2', 'diversity_3']
+        metric_values = [gen_metrics[metric] for metric in metrics_to_plot]
+        
+        plt.figure(figsize=(10, 6))
+        bars = plt.bar(metrics_to_plot, metric_values, color=['skyblue', 'lightgreen', 'lightcoral', 'gold'])
+        plt.title('Text Generation Quality Metrics')
+        plt.xlabel('Metrics')
+        plt.ylabel('Score')
+        plt.xticks(rotation=45)
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, metric_values):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                    f'{value:.3f}', ha='center', va='bottom')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'generation_metrics.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _generate_summary_report(self, results: Dict, output_dir: str):
+        """Generate text summary report"""
+        
+        report = f"""
+# Multimodal LLM Evaluation Report
+
+## Model Performance Summary
+
+### Perplexity
+- **Test Perplexity**: {results['perplexity']:.2f}
+
+### Generation Quality Metrics
+- **BLEU Score**: {results['generation_metrics']['bleu_score']:.3f}
+- **Average Generated Length**: {results['generation_metrics']['avg_gen_length']:.1f} words
+- **Average Reference Length**: {results['generation_metrics']['avg_ref_length']:.1f} words
+- **Length Ratio**: {results['generation_metrics']['length_ratio']:.3f}
+- **Diversity-1 (Unigrams)**: {results['generation_metrics']['diversity_1']:.3f}
+- **Diversity-2 (Bigrams)**: {results['generation_metrics']['diversity_2']:.3f}
+- **Diversity-3 (Trigrams)**: {results['generation_metrics']['diversity_3']:.3f}
+
+### Modality Impact Analysis
+"""
+        
+        for modality, stats in results['modality_impact'].items():
+            report += f"""
+#### {modality.replace('_', ' ').title()}
+- Average Length: {stats['avg_length']:.1f} ± {stats['std_length']:.1f} words
+- Range: {stats['min_length']:.0f} - {stats['max_length']:.0f} words
+"""
+        
+        report += f"""
+## Model Configuration
+- Hidden Size: {results['model_config']['model']['hidden_size']}
+- Number of Attention Heads: {results['model_config']['model']['num_attention_heads']}
+- Number of Layers: {results['model_config']['model']['num_hidden_layers']}
+- Vision Model: {results['model_config']['model']['vision_model']}
+- Audio Model: {results['model_config']['model']['audio_model']}
+
+## Recommendations
+
+### Performance Analysis
+"""
+        
+        # Add performance analysis
+        perplexity = results['perplexity']
+        if perplexity < 20:
+            report += "- ✅ **Excellent** perplexity score indicates strong language modeling capability\n"
+        elif perplexity < 50:
+            report += "- ⚠️ **Good** perplexity score with room for improvement\n"
+        else:
+            report += "- ❌ **Poor** perplexity score suggests need for more training or model adjustments\n"
+        
+        bleu = results['generation_metrics']['bleu_score']
+        if bleu > 0.3:
+            report += "- ✅ **Good** BLEU score indicates quality text generation\n"
+        elif bleu > 0.15:
+            report += "- ⚠️ **Moderate** BLEU score suggests acceptable generation quality\n"
+        else:
+            report += "- ❌ **Low** BLEU score indicates poor generation quality\n"
+        
+        diversity = results['generation_metrics']['diversity_1']
+        if diversity > 0.7:
+            report += "- ✅ **High** diversity indicates varied and creative text generation\n"
+        elif diversity > 0.5:
+            report += "- ⚠️ **Moderate** diversity with some repetition in generated text\n"
+        else:
+            report += "- ❌ **Low** diversity suggests repetitive text generation\n"
+        
+        # Save report
+        with open(os.path.join(output_dir, 'evaluation_report.md'), 'w') as f:
+            f.write(report)
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Evaluate Multimodal LLM")
+    parser.add_argument("--model_path", required=True, help="Path to trained model")
+    parser.add_argument("--config_path", default="config/config.yaml", help="Path to config file")
+    parser.add_argument("--output_dir", default="evaluation_results", help="Output directory")
+    parser.add_argument("--num_samples", type=int, default=100, help="Number of samples for evaluation")
+    
+    args = parser.parse_args()
+    
+    evaluator = MultimodalEvaluator(args.model_path, args.config_path)
+    results = evaluator.generate_evaluation_report(args.output_dir)
+    
+    print("\n" + "="*50)
+    print("EVALUATION SUMMARY")
+    print("="*50)
+    print(f"Perplexity: {results['perplexity']:.2f}")
+    print(f"BLEU Score: {results['generation_metrics']['bleu_score']:.3f}")
+    print(f"Diversity-1: {results['generation_metrics']['diversity_1']:.3f}")
+    print("="*50)
+
+if __name__ == "__main__":
+    main()
+
+🚀 run.py
+#!/usr/bin/env python3
+"""
+Main runner script for the Multimodal LLM project
+Provides a unified interface for training, evaluation, and inference
+"""
+
+import argparse
+import os
+import sys
+import yaml
+from typing import Dict, Any
+
+def setup_environment():
+    """Setup environment and check dependencies"""
+    try:
+        import torch
+        import transformers
+        import datasets
+        import wandb
+        print("✅ All dependencies available")
+        print(f"PyTorch version: {torch.__version__}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"CUDA devices: {torch.cuda.device_count()}")
+    except ImportError as e:
+        print(f"❌ Missing dependency: {e}")
+        sys.exit(1)
+
+def train_model(config_path: str, resume_from: str = None):
+    """Train the multimodal model"""
+    from train import MultimodalTrainer
+    
+    print("🚀 Starting training...")
+    trainer = MultimodalTrainer(config_path)
+    
+    if resume_from:
+        print(f"📂 Resuming from checkpoint: {resume_from}")
+        trainer.load_checkpoint(resume_from)
+    
+    trainer.train()
+    print("✅ Training completed!")
+
+def evaluate_model(model_path: str, config_path: str, output_dir: str):
+    """Evaluate the trained model"""
+    from evaluate import MultimodalEvaluator
+    
+    print("📊 Starting evaluation...")
+    evaluator = MultimodalEvaluator(model_path, config_path)
+    results = evaluator.generate_evaluation_report(output_dir)
+    print("✅ Evaluation completed!")
+    return results
+
+def run_inference(model_path: str, 
+                 config_path: str,
+                 input_data: Dict[str, Any],
+                 output_file: str = None):
+    """Run inference on input data"""
+    from predict import MultimodalPredictor
+    
+    print("🔮 Running inference...")
+    predictor = MultimodalPredictor(model_path, config_path)
+    
+    if 'file_path' in input_data:
+        result = predictor.predict_from_file(
+            input_data['file_path'],
+            input_data.get('prompt', ''),
+            input_data.get('max_length', 100),
+            input_data.get('temperature', 0.7),
+            input_data.get('top_p', 0.9)
+        )
+    else:
+        result = predictor.predict_multimodal(
+            text=input_data.get('text', ''),
+            image_path=input_data.get('image_path'),
+            audio_path=input_data.get('audio_path'),
+            video_path=input_data.get('video_path'),
+            max_length=input_data.get('max_length', 100),
+            temperature=input_data.get('temperature', 0.7),
+            top_p=input_data.get('top_p', 0.9)
+        )
+    
+    print("Generated text:")
+    print("-" * 50)
+    print(result)
+    print("-" * 50)
+    
+    if output_file:
+        with open(output_file, 'w') as f:
+            f.write(result)
+        print(f"💾 Result saved to: {output_file}")
+    
+    return result
+
+def setup_project():
+    """Setup project structure and download required models"""
+    print("🔧 Setting up project...")
+    
+    # Create directories
+    directories = [
+        "data/raw",
+        "data/processed", 
+        "models/checkpoints",
+        "models/pretrained",
+        "logs",
+        "evaluation_results",
+        "outputs"
+    ]
+    
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+        print(f"📁 Created directory: {directory}")
+    
+    # Check config file
+    if not os.path.exists("config/config.yaml"):
+        print("⚠️ Config file not found. Please ensure config/config.yaml exists.")
+        return False
+    
+    print("✅ Project setup completed!")
+    return True
+
+def validate_config(config_path: str) -> bool:
+    """Validate configuration file"""
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        required_sections = ['model', 'training', 'data', 'paths']
+        for section in required_sections:
+            if section not in config:
+                print(f"❌ Missing required config section: {section}")
+                return False
+        
+        print("✅ Configuration file is valid")
+        return True
+    
+    except Exception as e:
+        print(f"❌ Error validating config: {e}")
+        return False
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Multimodal LLM - Unified Training, Evaluation, and Inference",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Setup project
+  python run.py setup
+  
+  # Train model
+  python run.py train --config config/config.yaml
+  
+  # Resume training
+  python run.py train --config config/config.yaml --resume models/checkpoints/checkpoint_step_1000.pt
+  
+  # Evaluate model
+  python run.py evaluate --model models/checkpoints/best_model.pt --output evaluation_results
+  
+  # Run inference with text
+  python run.py predict --model models/checkpoints/best_model.pt --text "Describe this image" --image path/to/image.jpg
+  
+  # Run inference with file
+  python run.py predict --model models/checkpoints/best_model.pt --file path/to/multimodal_file.json
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    
+    # Setup command
+    setup_parser = subparsers.add_parser('setup', help='Setup project structure')
+    
+    # Train command
+    train_parser = subparsers.add_parser('train', help='Train the model')
+    train_parser.add_argument('--config', default='config/config.yaml', help='Config file path')
+    train_parser.add_argument('--resume', help='Resume from checkpoint')
+    
+    # Evaluate command
+    eval_parser = subparsers.add_parser('evaluate', help='Evaluate the model')
+    eval_parser.add_argument('--model', required=True, help='Model checkpoint path')
+    eval_parser.add_argument('--config', default='config/config.yaml', help='Config file path')
+    eval_parser.add_argument('--output', default='evaluation_results', help='Output directory')
+    
+    # Predict command
+    predict_parser = subparsers.add_parser('predict', help='Run inference')
+    predict_parser.add_argument('--model', required=True, help='Model checkpoint path')
+    predict_parser.add_argument('--config', default='config/config.yaml', help='Config file path')
+    predict_parser.add_argument('--file', help='Input file path')
+    predict_parser.add_argument('--text', help='Input text')
+    predict_parser.add_argument('--image', help='Input image path')
+    predict_parser.add_argument('--audio', help='Input audio path')
+    predict_parser.add_argument('--video', help='Input video path')
+    predict_parser.add_argument('--prompt', default='', help='Text prompt')
+    predict_parser.add_argument('--max_length', type=int, default=100, help='Max generation length')
+    predict_parser.add_argument('--temperature', type=float, default=0.7, help='Generation temperature')
+    predict_parser.add_argument('--top_p', type=float, default=0.9, help='Top-p sampling')
+    predict_parser.add_argument('--output', help='Output file path')
+    
+    # Validate command
+    validate_parser = subparsers.add_parser('validate', help='Validate configuration')
+    validate_parser.add_argument('--config', default='config/config.yaml', help='Config file path')
+    
+    args = parser.parse_args()
+    
+    if args.command is None:
+        parser.print_help()
+        return
+    
+    # Setup environment
+    setup_environment()
+    
+    if args.command == 'setup':
+        setup_project()
+    
+    elif args.command == 'validate':
+        validate_config(args.config)
+    
+    elif args.command == 'train':
+        if not validate_config(args.config):
+            sys.exit(1)
+        train_model(args.config, args.resume)
+    
+    elif args.command == 'evaluate':
+        if not validate_config(args.config):
+            sys.exit(1)
+        evaluate_model(args.model, args.config, args.output)
+    
+    elif args.command == 'predict':
+        if not validate_config(args.config):
+            sys.exit(1)
+        
+        input_data = {}
+        if args.file:
+            input_data['file_path'] = args.file
+        else:
+            input_data.update({
+                'text': args.text or '',
+                'image_path': args.image,
+                'audio_path': args.audio,
+                'video_path': args.video,
+                'prompt': args.prompt,
+                'max_length': args.max_length,
+                'temperature': args.temperature,
+                'top_p': args.top_p
+            })
+        
+        run_inference(args.model, args.config, input_data, args.output)
+
+if __name__ == "__main__":
+    main()
+
 
 
