@@ -427,3 +427,394 @@ class MultimodalTokenizer:
         return len(self.text_tokenizer)
 ```
 
+## 📊 dataset.py (continued)
+
+```python
+import torch
+from torch.utils.data import Dataset, DataLoader
+import os
+import json
+import yaml
+from typing import Dict, List, Any
+from utils.data_processors import MultimodalDataProcessor
+from tokenizer import MultimodalTokenizer
+
+class MultimodalDataset(Dataset):
+    def __init__(self, data_dir: str, config_path: str = "config/config.yaml", split: str = "train"):
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+        
+        self.data_dir = data_dir
+        self.split = split
+        self.processor = MultimodalDataProcessor(self.config)
+        self.tokenizer = MultimodalTokenizer(config_path)
+        
+        # Load data index
+        self.data_index = self._build_data_index()
+        
+    def _build_data_index(self) -> List[Dict[str, Any]]:
+        """Build index of all data files"""
+        data_index = []
+        
+        # Scan all subdirectories for files
+        for root, dirs, files in os.walk(self.data_dir):
+            for file in files:
+                if file.startswith('.'):
+                    continue
+                    
+                file_path = os.path.join(root, file)
+                file_type = self.processor.detect_file_type(file_path)
+                
+                data_index.append({
+                    'file_path': file_path,
+                    'file_type': file_type,
+                    'relative_path': os.path.relpath(file_path, self.data_dir)
+                })
+        
+        # Split data
+        total_size = len(data_index)
+        train_size = int(total_size * self.config['data']['train_split'])
+        val_size = int(total_size * self.config['data']['val_split'])
+        
+        if self.split == "train":
+            return data_index[:train_size]
+        elif self.split == "val":
+            return data_index[train_size:train_size + val_size]
+        else:  # test
+            return data_index[train_size + val_size:]
+    
+    def __len__(self) -> int:
+        return len(self.data_index)
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Get a single data sample"""
+        item = self.data_index[idx]
+        
+        # Process the file
+        processed_data = self.processor.process_file(
+            item['file_path'], 
+            item['file_type']
+        )
+        
+        # Tokenize and encode
+        encoded_data = self.tokenizer.encode_multimodal(processed_data)
+        
+        # Add labels (for training, we use the text as target)
+        if processed_data['text']:
+            labels = self.tokenizer.tokenize_text(processed_data['text'])['input_ids']
+        else:
+            labels = torch.zeros_like(encoded_data['input_ids'])
+        
+        encoded_data['labels'] = labels
+        
+        return encoded_data
+
+def create_dataloaders(config_path: str = "config/config.yaml") -> Dict[str, DataLoader]:
+    """Create train, validation, and test dataloaders"""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    data_dir = config['paths']['data_dir']
+    batch_size = config['data']['batch_size']
+    num_workers = config['data']['max_workers']
+    
+    # Create datasets
+    train_dataset = MultimodalDataset(data_dir, config_path, "train")
+    val_dataset = MultimodalDataset(data_dir, config_path, "val")
+    test_dataset = MultimodalDataset(data_dir, config_path, "test")
+    
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    return {
+        'train': train_loader,
+        'val': val_loader,
+        'test': test_loader
+    }
+
+class CollateFunction:
+    """Custom collate function for batching multimodal data"""
+    
+    def __call__(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """Collate batch of multimodal samples"""
+        collated = {}
+        
+        # Stack tensors
+        for key in batch[0].keys():
+            if key in ['input_ids', 'attention_mask', 'labels']:
+                collated[key] = torch.stack([item[key] for item in batch])
+            elif key in ['image', 'audio', 'video']:
+                collated[key] = torch.stack([item[key] for item in batch])
+            elif key in ['has_image', 'has_audio', 'has_video']:
+                collated[key] = torch.stack([item[key] for item in batch])
+        
+        return collated
+```
+
+## 🧠 model.py
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import GPT2LMHeadModel, GPT2Config
+import yaml
+from typing import Dict, Optional, Tuple
+
+class ImageEncoder(nn.Module):
+    """Encode images to feature vectors"""
+    
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(3, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, 3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((7, 7))
+        )
+        self.fc = nn.Linear(256 * 7 * 7, hidden_size)
+        self.dropout = nn.Dropout(0.1)
+    
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        # images: (batch_size, 3, 224, 224)
+        x = self.conv_layers(images)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        x = self.dropout(x)
+        return x
+
+class AudioEncoder(nn.Module):
+    """Encode audio to feature vectors"""
+    
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(1, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Conv1d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Conv1d(128, 256, 3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(100)
+        )
+        self.fc = nn.Linear(256 * 100, hidden_size)
+        self.dropout = nn.Dropout(0.1)
+    
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        # audio: (batch_size, seq_len)
+        x = audio.unsqueeze(1)  # Add channel dimension
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        x = self.dropout(x)
+        return x
+
+class VideoEncoder(nn.Module):
+    """Encode video to feature vectors"""
+    
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.frame_encoder = ImageEncoder(hidden_size // 2)
+        self.temporal_encoder = nn.LSTM(
+            hidden_size // 2, 
+            hidden_size // 2, 
+            batch_first=True
+        )
+        self.fc = nn.Linear(hidden_size // 2, hidden_size)
+        self.dropout = nn.Dropout(0.1)
+    
+    def forward(self, video: torch.Tensor) -> torch.Tensor:
+        # video: (batch_size, num_frames, 3, 224, 224)
+        batch_size, num_frames = video.size(0), video.size(1)
+        
+        # Encode each frame
+        video_flat = video.view(-1, 3, 224, 224)
+        frame_features = self.frame_encoder(video_flat)
+        frame_features = frame_features.view(batch_size, num_frames, -1)
+        
+        # Encode temporal information
+        temporal_features, _ = self.temporal_encoder(frame_features)
+        
+        # Use last frame's features
+        video_features = temporal_features[:, -1, :]
+        video_features = self.fc(video_features)
+        video_features = self.dropout(video_features)
+        
+        return video_features
+
+class MultimodalFusion(nn.Module):
+    """Fuse multimodal features"""
+    
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.hidden_size = hidden_size
+        
+        # Projection layers for each modality
+        self.text_proj = nn.Linear(hidden_size, hidden_size)
+        self.image_proj = nn.Linear(hidden_size, hidden_size)
+        self.audio_proj = nn.Linear(hidden_size, hidden_size)
+        self.video_proj = nn.Linear(hidden_size, hidden_size)
+        
+        # Attention mechanism for fusion
+        self.attention = nn.MultiheadAttention(hidden_size, 8, batch_first=True)
+        self.norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(0.1)
+    
+    def forward(self, 
+                text_features: torch.Tensor,
+                image_features: Optional[torch.Tensor] = None,
+                audio_features: Optional[torch.Tensor] = None,
+                video_features: Optional[torch.Tensor] = None,
+                modality_flags: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+        
+        features = [self.text_proj(text_features)]
+        
+        if image_features is not None and modality_flags.get('has_image', torch.tensor(0.0)).sum() > 0:
+            features.append(self.image_proj(image_features))
+        
+        if audio_features is not None and modality_flags.get('has_audio', torch.tensor(0.0)).sum() > 0:
+            features.append(self.audio_proj(audio_features))
+        
+        if video_features is not None and modality_flags.get('has_video', torch.tensor(0.0)).sum() > 0:
+            features.append(self.video_proj(video_features))
+        
+        if len(features) == 1:
+            return features[0]
+        
+        # Stack features for attention
+        stacked_features = torch.stack(features, dim=1)
+        
+        # Apply attention
+        attended_features, _ = self.attention(
+            stacked_features, stacked_features, stacked_features
+        )
+        
+        # Average pool attended features
+        fused_features = attended_features.mean(dim=1)
+        fused_features = self.norm(fused_features + text_features)
+        fused_features = self.dropout(fused_features)
+        
+        return fused_features
+
+class MultimodalLLM(nn.Module):
+    """Main multimodal language model"""
+    
+    def __init__(self, config_path: str = "config/config.yaml"):
+        super().__init__()
+        
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        self.config = config['model']
+        hidden_size = self.config['hidden_size']
+        
+        # Initialize text model (GPT-2 based)
+        gpt_config = GPT2Config(
+            vocab_size=self.config['vocab_size'],
+            n_embd=hidden_size,
+            n_layer=self.config['num_layers'],
+            n_head=self.config['num_heads'],
+            resid_pdrop=self.config['dropout'],
+            embd_pdrop=self.config['dropout'],
+            attn_pdrop=self.config['dropout'],
+        )
+        
+        self.text_model = GPT2LMHeadModel(gpt_config)
+        
+        # Initialize modality encoders
+        self.image_encoder = ImageEncoder(hidden_size)
+        self.audio_encoder = AudioEncoder(hidden_size)
+        self.video_encoder = VideoEncoder(hidden_size)
+        
+        # Initialize fusion module
+        self.fusion = MultimodalFusion(hidden_size)
+        
+        # Output projection
+        self.output_proj = nn.Linear(hidden_size, self.config['vocab_size'])
+        
+    def forward(self, 
+                input_ids: torch.Tensor,
+                attention_mask: torch.Tensor,
+                image: Optional[torch.Tensor] = None,
+                audio: Optional[torch.Tensor] = None,
+                video: Optional[torch.Tensor] = None,
+                has_image: Optional[torch.Tensor] = None,
+                has_audio: Optional[torch.Tensor] = None,
+                has_video: Optional[torch.Tensor] = None,
+                labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        
+        # Get text embeddings
+        text_outputs = self.text_model.transformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
+        text_features = text_outputs.last_hidden_state
+        
+        # Encode other modalities
+        image_features = None
+        audio_features = None
+        video_features = None
+        
+        if image is not None:
+            image_features = self.image_encoder(image)
+            image_features = image_features.unsqueeze(1).expand(-1, text_features.size(1), -1)
+        
+        if audio is not None:
+            audio_features = self.audio_encoder(audio)
+            audio_features = audio_features.unsqueeze(1).expand(-1, text_features.size(1), -1)
+        
+        if video is not None:
+            video_features = self.video_encoder(video)
+            video_features = video_features.unsqueeze(1).expand(-1, text_features.size(1), -1)
+        
+        # Fuse modalities
+        modality_flags = {
+            'has_image': has_image,
+            'has_audio': has_audio,
+            'has_video': has_video
+        }
+        
+        # Apply fusion for each sequence position
+        batch_size, seq_len, hidden_size = text_features.shape
+        fused_features = []
+        
+        for i in range(seq_len):
+            fused = self.fusion(
+                text_features[:, i, :],
+                image_features[:, i, :] if image_features is not None else None,
+                audio_features[:, i, :] if audio_features is not None else None,
+                video_features[:, i, :] if video_features is not None else None,
+                modality_flags
+            )
+            fused_features.append(fused)
+        
+
