@@ -3267,5 +3267,255 @@ class TestDataCollator:
 if __name__ == "__main__":
     pytest.main([__file__])
 
-🧪 tests/test_evaluation.py
+# 🚀 Quick Windows Setup & Execution Guide
 
+## 1. Prerequisites Installation (5 minutes)
+
+```bash
+# Install Python 3.8+ from python.org
+# Install Git from git-scm.com
+# Install CUDA Toolkit 11.8+ (if you have NVIDIA GPU)
+```
+
+## 2. One-Command Setup
+
+```bash
+# Clone and setup in one go
+git clone https://github.com/yourusername/multimodal-llm.git && cd multimodal-llm && python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
+```
+
+## 3. Create Essential Files
+
+**Create `requirements.txt`:**
+```txt
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+datasets>=2.12.0
+accelerate>=0.20.0
+gradio>=3.35.0
+Pillow>=9.5.0
+librosa>=0.10.0
+opencv-python>=4.7.0
+scikit-learn>=1.2.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.65.0
+wandb>=0.15.0
+tensorboard>=2.13.0
+pyyaml>=6.0
+rouge-score>=0.1.2
+sacrebleu>=2.3.0
+pytest>=7.3.0
+black>=23.0.0
+flake8>=6.0.0
+```
+
+**Create `run.py`:**
+```python
+import argparse
+import os
+import sys
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('command', choices=['train', 'evaluate', 'predict', 'demo'])
+    parser.add_argument('--config', default='config/config.yaml')
+    parser.add_argument('--input', help='Input file/text for prediction')
+    parser.add_argument('--output', help='Output file')
+    
+    args = parser.parse_args()
+    
+    if args.command == 'train':
+        from src.train import MultimodalTrainer
+        trainer = MultimodalTrainer(args.config)
+        trainer.train()
+    
+    elif args.command == 'evaluate':
+        from src.evaluate import main as eval_main
+        eval_main(args.config)
+    
+    elif args.command == 'predict':
+        from src.predict import MultimodalPredictor
+        predictor = MultimodalPredictor()
+        result = predictor.predict(args.input)
+        print(f"Result: {result}")
+    
+    elif args.command == 'demo':
+        from demo.gradio_app import launch_demo
+        launch_demo()
+
+if __name__ == "__main__":
+    main()
+```
+
+**Create `config/config.yaml`:**
+```yaml
+model:
+  hidden_size: 768
+  num_attention_heads: 12
+  num_hidden_layers: 6
+  vocab_size: 50257
+  max_position_embeddings: 1024
+
+training:
+  batch_size: 4
+  learning_rate: 5e-5
+  num_epochs: 3
+  warmup_steps: 500
+
+data:
+  max_text_length: 512
+  image_size: 224
+  train_file: "data/train.json"
+  val_file: "data/val.json"
+
+paths:
+  output_dir: "models/checkpoints"
+  log_dir: "logs"
+```
+
+## 4. Quick Test Run
+
+```bash
+# Activate environment
+venv\Scripts\activate
+
+# Create directories
+mkdir data models logs demo src config
+
+# Test installation
+python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
+
+# Run demo (creates minimal working example)
+python run.py demo
+```
+
+## 5. Minimal Working Demo
+
+**Create `demo/gradio_app.py`:**
+```python
+import gradio as gr
+import torch
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+def launch_demo():
+    # Load pretrained model for demo
+    model_name = "gpt2"
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+    model = GPT2LMHeadModel.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    def generate_text(prompt, max_length=100):
+        inputs = tokenizer.encode(prompt, return_tensors="pt")
+        
+        with torch.no_grad():
+            outputs = model.generate(
+                inputs, 
+                max_length=max_length,
+                num_return_sequences=1,
+                temperature=0.7,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return generated_text
+    
+    def multimodal_chat(text, image, audio):
+        # Simple demo - just use text for now
+        if text:
+            response = generate_text(text)
+            return response
+        return "Please provide some text input."
+    
+    # Create Gradio interface
+    interface = gr.Interface(
+        fn=multimodal_chat,
+        inputs=[
+            gr.Textbox(label="Text Input", placeholder="Enter your text here..."),
+            gr.Image(label="Image Input (Optional)", type="pil"),
+            gr.Audio(label="Audio Input (Optional)", type="filepath")
+        ],
+        outputs=gr.Textbox(label="Generated Response"),
+        title="🤖 Multimodal LLM Demo",
+        description="A simple multimodal language model demo. Currently supports text generation.",
+        examples=[
+            ["Tell me a story about a robot", None, None],
+            ["Describe a beautiful landscape", None, None],
+            ["What is artificial intelligence?", None, None]
+        ]
+    )
+    
+    interface.launch(share=True, server_name="0.0.0.0", server_port=7860)
+
+if __name__ == "__main__":
+    launch_demo()
+```
+
+## 6. Execute Everything
+
+```bash
+# Single command to run everything
+cd multimodal-llm && venv\Scripts\activate && python run.py demo
+```
+
+## 7. Alternative: Docker Quick Start
+
+**Create `docker-compose.yml`:**
+```yaml
+version: '3.8'
+services:
+  multimodal-llm:
+    build: .
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    command: python run.py demo
+```
+
+**Run with Docker:**
+```bash
+# Build and run
+docker-compose up --build
+```
+
+## 8. Quick Test Commands
+
+```bash
+# Test model loading
+python -c "from transformers import GPT2Model; print('✅ Transformers working')"
+
+# Test GPU
+python -c "import torch; print(f'GPU Available: {torch.cuda.is_available()}')"
+
+# Run demo
+python run.py demo
+
+# Access demo at: http://localhost:7860
+```
+
+## 9. Troubleshooting
+
+```bash
+# If CUDA issues:
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# If gradio issues:
+pip install --upgrade gradio
+
+# If import errors:
+set PYTHONPATH=%cd%
+```
+
+## 🎯 Final One-Liner
+
+```bash
+git clone https://github.com/yourusername/multimodal-llm.git && cd multimodal-llm && python -m venv venv && venv\Scripts\activate && pip install torch torchvision torchaudio transformers gradio pillow && python run.py demo
+```
+
+**That's it! Your multimodal LLM will be running at `http://localhost:7860` in under 10 minutes! 🚀**
