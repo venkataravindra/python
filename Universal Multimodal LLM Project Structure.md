@@ -816,5 +816,82 @@ class MultimodalLLM(nn.Module):
                 modality_flags
             )
             fused_features.append(fused)
+                fused_features = torch.stack(fused_features, dim=1)
         
+        # Generate logits
+        logits = self.output_proj(fused_features)
+        
+        # Calculate loss if labels are provided
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        
+        return {
+            'logits': logits,
+            'loss': loss,
+            'hidden_states': fused_features
+        }
+    
+    def generate(self, 
+                 input_ids: torch.Tensor,
+                 attention_mask: torch.Tensor,
+                 image: Optional[torch.Tensor] = None,
+                 audio: Optional[torch.Tensor] = None,
+                 video: Optional[torch.Tensor] = None,
+                 max_length: int = 100,
+                 temperature: float = 1.0,
+                 top_p: float = 0.9) -> torch.Tensor:
+        """Generate text given multimodal inputs"""
+        
+        self.eval()
+        with torch.no_grad():
+            batch_size = input_ids.size(0)
+            device = input_ids.device
+            
+            # Prepare modality flags
+            has_image = torch.tensor(1.0 if image is not None else 0.0, device=device).expand(batch_size)
+            has_audio = torch.tensor(1.0 if audio is not None else 0.0, device=device).expand(batch_size)
+            has_video = torch.tensor(1.0 if video is not None else 0.0, device=device).expand(batch_size)
+            
+            generated = input_ids.clone()
+            
+            for _ in range(max_length):
+                outputs = self.forward(
+                    input_ids=generated,
+                    attention_mask=torch.ones_like(generated),
+                    image=image,
+                    audio=audio,
+                    video=video,
+                    has_image=has_image,
+                    has_audio=has_audio,
+                    has_video=has_video
+                )
+                
+                logits = outputs['logits'][:, -1, :] / temperature
+                
+                # Apply top-p sampling
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = float('-inf')
+                
+                probs = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                
+                generated = torch.cat([generated, next_token], dim=1)
+                
+                # Check for end token
+                if next_token.item() == 50256:  # GPT-2 end token
+                    break
+            
+            return generated
+
 
