@@ -2929,4 +2929,343 @@ class TestDataProcessor:
         text = sample_data['text']
         tokens = processor.tokenizer(text, return_tensors='pt', padding=True, truncation=True)
         
-        assert '
+                assert 'input_ids' in tokens
+        assert 'attention_mask' in tokens
+        assert tokens['input_ids'].shape[1] <= 128
+
+class TestTrainer:
+    
+    @pytest.fixture
+    def config_file(self, config, temp_dir):
+        """Create temporary config file"""
+        config_path = os.path.join(temp_dir, 'test_config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f)
+        return config_path
+    
+    @pytest.fixture
+    def temp_dir(self):
+        """Create temporary directory"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            yield tmp_dir
+    
+    def test_trainer_initialization(self, config_file):
+        """Test trainer initialization"""
+        trainer = MultimodalTrainer(config_file)
+        assert trainer is not None
+        assert trainer.config is not None
+    
+    def test_model_setup(self, config_file):
+        """Test model setup in trainer"""
+        trainer = MultimodalTrainer(config_file)
+        trainer.setup_model()
+        
+        assert trainer.model is not None
+        assert trainer.optimizer is not None
+        assert trainer.scheduler is not None
+
+class TestIntegration:
+    """Integration tests for the complete pipeline"""
+    
+    @pytest.fixture
+    def temp_workspace(self):
+        """Create temporary workspace"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # Create directory structure
+            os.makedirs(os.path.join(tmp_dir, 'data', 'raw'))
+            os.makedirs(os.path.join(tmp_dir, 'data', 'processed'))
+            os.makedirs(os.path.join(tmp_dir, 'models', 'checkpoints'))
+            os.makedirs(os.path.join(tmp_dir, 'logs'))
+            yield tmp_dir
+    
+    def test_end_to_end_pipeline(self, temp_workspace):
+        """Test complete training pipeline"""
+        # Create minimal config
+        config = {
+            'model': {
+                'hidden_size': 128,
+                'num_attention_heads': 2,
+                'num_hidden_layers': 1,
+                'vocab_size': 1000,
+                'max_position_embeddings': 256,
+                'vision_model': 'openai/clip-vit-base-patch32',
+                'audio_model': 'openai/whisper-tiny'
+            },
+            'training': {
+                'batch_size': 1,
+                'learning_rate': 1e-4,
+                'num_epochs': 1,
+                'warmup_steps': 1,
+                'save_steps': 10,
+                'eval_steps': 10,
+                'logging_steps': 5
+            },
+            'data': {
+                'max_text_length': 64,
+                'image_size': 224,
+                'audio_max_length': 5.0,
+                'train_file': os.path.join(temp_workspace, 'data', 'processed', 'train.json'),
+                'val_file': os.path.join(temp_workspace, 'data', 'processed', 'val.json')
+            },
+            'paths': {
+                'output_dir': os.path.join(temp_workspace, 'models', 'checkpoints'),
+                'log_dir': os.path.join(temp_workspace, 'logs')
+            }
+        }
+        
+        # Save config
+        config_path = os.path.join(temp_workspace, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f)
+        
+        # Create dummy training data
+        train_data = [
+            {
+                'text': 'This is a test sample',
+                'image_path': None,
+                'audio_path': None,
+                'target': 'This is the target text'
+            }
+        ]
+        
+        import json
+        with open(config['data']['train_file'], 'w') as f:
+            for item in train_data:
+                f.write(json.dumps(item) + '\n')
+        
+        with open(config['data']['val_file'], 'w') as f:
+            for item in train_data:
+                f.write(json.dumps(item) + '\n')
+        
+        # Test trainer initialization
+        trainer = MultimodalTrainer(config_path)
+        trainer.setup_model()
+        
+        # Test that model can be created and moved to device
+        assert trainer.model is not None
+        
+        # Test data loading
+        trainer.setup_data()
+        assert trainer.train_dataloader is not None
+        assert trainer.val_dataloader is not None
+
+if __name__ == "__main__":
+    pytest.main([__file__])
+
+🧪 tests/test_data_processor.py
+
+import pytest
+import torch
+import tempfile
+import os
+import json
+import numpy as np
+from PIL import Image
+import librosa
+
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.data_processor import MultimodalDataProcessor, MultimodalDataset
+
+class TestMultimodalDataProcessor:
+    
+    @pytest.fixture
+    def config(self):
+        return {
+            'data': {
+                'max_text_length': 128,
+                'image_size': 224,
+                'audio_max_length': 10.0,
+                'video_fps': 1,
+                'video_max_frames': 8
+            }
+        }
+    
+    @pytest.fixture
+    def processor(self, config):
+        return MultimodalDataProcessor(config)
+    
+    @pytest.fixture
+    def sample_image(self):
+        """Create sample image"""
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            image = Image.new('RGB', (224, 224), color='red')
+            image.save(tmp.name)
+            yield tmp.name
+        os.unlink(tmp.name)
+    
+    @pytest.fixture
+    def sample_audio(self):
+        """Create sample audio"""
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            # Create 1 second of sine wave
+            sample_rate = 16000
+            duration = 1.0
+            t = np.linspace(0, duration, int(sample_rate * duration))
+            audio = np.sin(2 * np.pi * 440 * t)  # 440 Hz sine wave
+            
+            # Save as wav (simplified - in real tests use proper audio library)
+            np.save(tmp.name.replace('.wav', '.npy'), audio)
+            yield tmp.name.replace('.wav', '.npy')
+        try:
+            os.unlink(tmp.name.replace('.wav', '.npy'))
+        except:
+            pass
+    
+    def test_text_processing(self, processor):
+        """Test text tokenization"""
+        text = "This is a test sentence for tokenization."
+        
+        result = processor.process_text(text)
+        
+        assert 'input_ids' in result
+        assert 'attention_mask' in result
+        assert result['input_ids'].shape[0] <= 128
+    
+    def test_image_processing(self, processor, sample_image):
+        """Test image processing"""
+        result = processor.process_image(sample_image)
+        
+        assert result is not None
+        assert result.shape == (3, 224, 224)  # CHW format
+        assert result.dtype == torch.float32
+    
+    def test_batch_processing(self, processor):
+        """Test batch processing"""
+        texts = ["First text", "Second text", "Third text"]
+        
+        results = processor.process_text_batch(texts)
+        
+        assert results['input_ids'].shape[0] == 3
+        assert results['attention_mask'].shape[0] == 3
+    
+    def test_invalid_image_handling(self, processor):
+        """Test handling of invalid image paths"""
+        result = processor.process_image("nonexistent_image.jpg")
+        assert result is None
+    
+    def test_empty_text_handling(self, processor):
+        """Test handling of empty text"""
+        result = processor.process_text("")
+        
+        assert 'input_ids' in result
+        assert 'attention_mask' in result
+
+class TestMultimodalDataset:
+    
+    @pytest.fixture
+    def temp_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            yield tmp_dir
+    
+    @pytest.fixture
+    def sample_dataset_file(self, temp_dir):
+        """Create sample dataset file"""
+        # Create sample images
+        image1_path = os.path.join(temp_dir, 'image1.jpg')
+        image2_path = os.path.join(temp_dir, 'image2.jpg')
+        
+        Image.new('RGB', (224, 224), color='red').save(image1_path)
+        Image.new('RGB', (224, 224), color='blue').save(image2_path)
+        
+        # Create dataset file
+        dataset_file = os.path.join(temp_dir, 'dataset.json')
+        data = [
+            {
+                'text': 'A red image',
+                'image_path': image1_path,
+                'audio_path': None,
+                'video_path': None,
+                'target': 'This is a red colored image'
+            },
+            {
+                'text': 'A blue image',
+                'image_path': image2_path,
+                'audio_path': None,
+                'video_path': None,
+                'target': 'This is a blue colored image'
+            }
+        ]
+        
+        with open(dataset_file, 'w') as f:
+            for item in data:
+                f.write(json.dumps(item) + '\n')
+        
+        return dataset_file
+    
+    @pytest.fixture
+    def config(self):
+        return {
+            'data': {
+                'max_text_length': 128,
+                'image_size': 224,
+                'audio_max_length': 10.0
+            }
+        }
+    
+    def test_dataset_loading(self, sample_dataset_file, config):
+        """Test dataset loading"""
+        dataset = MultimodalDataset(sample_dataset_file, config)
+        
+        assert len(dataset) == 2
+    
+    def test_dataset_getitem(self, sample_dataset_file, config):
+        """Test dataset item retrieval"""
+        dataset = MultimodalDataset(sample_dataset_file, config)
+        
+        item = dataset[0]
+        
+        assert 'input_ids' in item
+        assert 'attention_mask' in item
+        assert 'labels' in item
+        assert 'image_features' in item or item['image_features'] is None
+    
+    def test_dataset_iteration(self, sample_dataset_file, config):
+        """Test dataset iteration"""
+        dataset = MultimodalDataset(sample_dataset_file, config)
+        
+        items = list(dataset)
+        assert len(items) == 2
+        
+        for item in items:
+            assert isinstance(item, dict)
+            assert 'input_ids' in item
+
+class TestDataCollator:
+    
+    def test_collate_function(self):
+        """Test data collation for batching"""
+        from src.data_processor import collate_fn
+        
+        # Sample batch items
+        batch = [
+            {
+                'input_ids': torch.tensor([1, 2, 3, 4]),
+                'attention_mask': torch.tensor([1, 1, 1, 1]),
+                'labels': torch.tensor([2, 3, 4, 5]),
+                'image_features': torch.randn(512),
+                'audio_features': None
+            },
+            {
+                'input_ids': torch.tensor([1, 2, 3]),
+                'attention_mask': torch.tensor([1, 1, 1]),
+                'labels': torch.tensor([2, 3, 4]),
+                'image_features': torch.randn(512),
+                'audio_features': torch.randn(512)
+            }
+        ]
+        
+        collated = collate_fn(batch)
+        
+        assert collated['input_ids'].shape[0] == 2  # batch size
+        assert collated['attention_mask'].shape[0] == 2
+        assert collated['labels'].shape[0] == 2
+        assert collated['image_features'].shape[0] == 2
+        assert collated['audio_features'].shape[0] == 2
+
+if __name__ == "__main__":
+    pytest.main([__file__])
+
+🧪 tests/test_evaluation.py
+
