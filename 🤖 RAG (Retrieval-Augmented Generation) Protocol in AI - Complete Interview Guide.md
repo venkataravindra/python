@@ -1345,8 +1345,477 @@ async def ingest_documents(request: IngestionRequest, background_tasks: Backgrou
         logger.error(f"Error during ingestion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+```python
 @app.get("/stats", response_model=SystemStats)
 async def get_system_stats():
     """Get system statistics"""
     try:
+        stats = rag_pipeline.get_system_stats()
+        return SystemStats(**stats)
+        
+    except Exception as e:
+        logger.error(f"Error getting system stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        stats = rag_pipeline.get_system_stats()
+        return {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "components": {
+                "vector_store": "operational",
+                "generator": "operational",
+                "retriever": "operational"
+            },
+            "document_count": stats.get("vector_store", {}).get("total_documents", 0)
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": time.time()
+        }
+
+@app.post("/reset")
+async def reset_system():
+    """Reset the entire RAG system"""
+    try:
+        result = rag_pipeline.reset_system()
+        return result
+    except Exception as e:
+        logger.error(f"Error resetting system: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/search")
+async def search_documents(query: str, top_k: int = 5):
+    """Search documents without generating response"""
+    try:
+        if not rag_pipeline.retriever:
+            raise HTTPException(status_code=503, detail="RAG system not initialized")
+        
+        results = rag_pipeline.retriever.retrieve_documents(query, top_k)
+        
+        return {
+            "query": query,
+            "results": results,
+            "count": len(results)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error searching documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import time
+    
+    # Run the API server
+    uvicorn.run(
+        "api:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
+```
+
+### **10. Web Interface (`src/web_interface.py`)**
+
+```python
+# src/web_interface.py
+import streamlit as st
+import requests
+import json
+import time
+from typing import Dict, List
+
+# Configure Streamlit page
+st.set_page_config(
+    page_title="RAG Customer Support System",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# API Configuration
+API_BASE_URL = "http://localhost:8000"
+
+def call_api(endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
+    """Make API calls to the RAG system"""
+    try:
+        url = f"{API_BASE_URL}{endpoint}"
+        
+        if method == "GET":
+            response = requests.get(url)
+        elif method == "POST":
+            response = requests.post(url, json=data)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        
+        response.raise_for_status()
+        return response.json()
+        
+    except requests.exceptions.ConnectionError:
+        st.error("❌ Cannot connect to RAG API. Please ensure the API server is running on port 8000.")
+        return {"error": "Connection failed"}
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ API Error: {str(e)}")
+        return {"error": str(e)}
+
+def display_sources(sources: List[Dict]):
+    """Display source documents in a formatted way"""
+    if not sources:
+        return
+    
+    st.subheader("📚 Sources")
+    
+    for i, source in enumerate(sources):
+        with st.expander(f"Source {source['number']}: {source['file_name']}"):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.write(f"**File:** {source['file_name']}")
+            
+            with col2:
+                similarity = source.get('similarity_score', 0)
+                st.metric("Similarity", f"{similarity:.3f}")
+
+def display_metrics(metrics: Dict, response_data: Dict):
+    """Display response quality metrics"""
+    st.subheader("📊 Response Metrics")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        quality_score = metrics.get('overall', 0)
+        st.metric(
+            "Quality Score", 
+            f"{quality_score:.3f}",
+            delta=None,
+            help="Overall response quality (0-1)"
+        )
+    
+    with col2:
+        st.metric(
+            "Documents Used", 
+            response_data.get('documents_retrieved', 0),
+            help="Number of documents retrieved"
+        )
+    
+    with col3:
+        st.metric(
+            "Response Time", 
+            f"{response_data.get('total_time', 0):.2f}s",
+            help="Total processing time"
+        )
+    
+    with col4:
+        st.metric(
+            "Tokens Used", 
+            response_data.get('tokens_used', 0),
+            help="LLM tokens consumed"
+        )
+    
+    # Detailed metrics
+    with st.expander("Detailed Metrics"):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Relevance", f"{metrics.get('relevance', 0):.3f}")
+        with col2:
+            st.metric("Groundedness", f"{metrics.get('groundedness', 0):.3f}")
+        with col3:
+            st.metric("Completeness", f"{metrics.get('completeness', 0):.3f}")
+
+def main():
+    """Main Streamlit application"""
+    
+    # Header
+    st.title("🤖 RAG Customer Support System")
+    st.markdown("Ask questions about our products and services!")
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        
+        # Query settings
+        st.subheader("Query Configuration")
+        
+        retrieval_strategy = st.selectbox(
+            "Retrieval Strategy",
+            ["similarity", "hybrid", "rerank"],
+            help="Choose how documents are retrieved"
+        )
+        
+        prompt_type = st.selectbox(
+            "Response Type",
+            ["customer_support", "technical", "general"],
+            help="Choose the response style"
+        )
+        
+        include_citations = st.checkbox(
+            "Include Citations",
+            value=True,
+            help="Include source references in responses"
+        )
+        
+        top_k = st.slider(
+            "Documents to Retrieve",
+            min_value=1,
+            max_value=10,
+            value=5,
+            help="Number of relevant documents to use"
+        )
+        
+        st.divider()
+        
+        # System status
+        st.subheader("System Status")
+        
+        if st.button("🔄 Check Status"):
+            with st.spinner("Checking system status..."):
+                health_data = call_api("/health")
+                
+                if "error" not in health_data:
+                    st.success("✅ System Healthy")
+                    st.json(health_data)
+                else:
+                    st.error("❌ System Unhealthy")
+        
+        # System stats
+        if st.button("📊 View Stats"):
+            with st.spinner("Loading system statistics..."):
+                stats_data = call_api("/stats")
+                
+                if "error" not in stats_data:
+                    st.success("📈 System Statistics")
+                    
+                    # Document count
+                    doc_count = stats_data.get("vector_store", {}).get("total_documents", 0)
+                    st.metric("Total Documents", doc_count)
+                    
+                    # Configuration
+                    with st.expander("Configuration"):
+                        config_data = stats_data.get("config", {})
+                        for key, value in config_data.items():
+                            st.write(f"**{key}:** {value}")
+                else:
+                    st.error("Failed to load statistics")
+        
+        st.divider()
+        
+        # Document ingestion
+        st.subheader("📁 Document Management")
+        
+        with st.expander("Ingest Documents"):
+            document_path = st.text_input(
+                "Document Path",
+                value="./data/documents",
+                help="Path to document or directory"
+            )
+            
+            is_directory = st.checkbox("Is Directory", value=True)
+            
+            if st.button("📤 Ingest Documents"):
+                with st.spinner("Ingesting documents..."):
+                    ingest_data = call_api(
+                        "/ingest",
+                        method="POST",
+                        data={
+                            "document_path": document_path,
+                            "is_directory": is_directory
+                        }
+                    )
+                    
+                    if "error" not in ingest_data:
+                        st.success(f"✅ {ingest_data['message']}")
+                        st.write(f"Processed: {ingest_data['chunks_processed']} chunks")
+                        st.write(f"Time: {ingest_data['processing_time']:.2f}s")
+                    else:
+                        st.error("❌ Ingestion failed")
+        
+        # System reset
+        with st.expander("⚠️ System Reset"):
+            st.warning("This will delete all documents and reset the system!")
+            
+            if st.button("🗑️ Reset System", type="secondary"):
+                with st.spinner("Resetting system..."):
+                    reset_data = call_api("/reset", method="POST")
+                    
+                    if reset_data.get("status") == "success":
+                        st.success("✅ System reset successfully")
+                    else:
+                        st.error("❌ Reset failed")
+    
+    # Main content area
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # Chat interface
+        st.subheader("💬 Ask a Question")
+        
+        # Initialize chat history
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        
+        # Display chat history
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                
+                if message["role"] == "assistant" and "metadata" in message:
+                    # Display sources and metrics for assistant responses
+                    metadata = message["metadata"]
+                    
+                    if metadata.get("sources"):
+                        display_sources(metadata["sources"])
+                    
+                    if metadata.get("quality_metrics"):
+                        display_metrics(metadata["quality_metrics"], metadata)
+        
+        # Chat input
+        if prompt := st.chat_input("Ask your question here..."):
+            # Add user message to chat history
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            # Display user message
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            # Generate assistant response
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    # Call RAG API
+                    response_data = call_api(
+                        "/query",
+                        method="POST",
+                        data={
+                            "question": prompt,
+                            "retrieval_strategy": retrieval_strategy,
+                            "prompt_type": prompt_type,
+                            "include_citations": include_citations,
+                            "top_k": top_k
+                        }
+                    )
+                    
+                    if "error" not in response_data:
+                        # Display response
+                        st.markdown(response_data["answer"])
+                        
+                        # Store assistant message with metadata
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": response_data["answer"],
+                            "metadata": response_data
+                        })
+                        
+                        # Display sources and metrics
+                        if response_data.get("sources"):
+                            display_sources(response_data["sources"])
+                        
+                        if response_data.get("quality_metrics"):
+                            display_metrics(response_data["quality_metrics"], response_data)
+                    
+                    else:
+                        error_message = "I apologize, but I encountered an error processing your question. Please try again."
+                        st.error(error_message)
+                        
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": error_message
+                        })
+    
+    with col2:
+        # Quick actions and examples
+        st.subheader("🚀 Quick Start")
+        
+        # Example questions
+        st.write("**Try these example questions:**")
+        
+        example_questions = [
+            "How do I install the software?",
+            "What are the system requirements?",
+            "How is billing calculated?",
+            "What API endpoints are available?",
+            "How do I reset my password?",
+            "What support options are available?"
+        ]
+        
+        for question in example_questions:
+            if st.button(question, key=f"example_{hash(question)}"):
+                # Add to chat input (simulate user input)
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.rerun()
+        
+        st.divider()
+        
+        # Search functionality
+        st.subheader("🔍 Document Search")
+        
+        search_query = st.text_input("Search documents:", placeholder="Enter search terms...")
+        search_top_k = st.slider("Results to show:", 1, 10, 3)
+        
+        if st.button("🔍 Search") and search_query:
+            with st.spinner("Searching..."):
+                search_results = call_api(f"/search?query={search_query}&top_k={search_top_k}")
+                
+                if "error" not in search_results:
+                    st.success(f"Found {search_results['count']} results")
+                    
+                    for i, result in enumerate(search_results["results"]):
+                        with st.expander(f"Result {i+1} - {result['metadata']['file_name']}"):
+                            st.write(f"**Similarity:** {result['similarity_score']:.3f}")
+                            st.write(f"**Content:** {result['content'][:200]}...")
+                else:
+                    st.error("Search failed")
+        
+        st.divider()
+        
+        # Clear chat history
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.messages = []
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
+```
+
+### **11. Testing Suite (`tests/test_rag_system.py`)**
+
+```python
+# tests/test_rag_system.py
+import pytest
+import os
+import tempfile
+import shutil
+from unittest.mock import Mock, patch
+
+# Import our modules
+import sys
+sys.path.append('../src')
+
+from document_processor import DocumentProcessor
+from vector_store import VectorStore
+from retriever import DocumentRetriever
+from generator import ResponseGenerator
+from rag_pipeline import RAGPipeline
+
+class TestDocumentProcessor:
+    """Test document processing functionality"""
+    
+    def setup_method(self):
+        """Setup test environment"""
+        self.temp_dir = tempfile.mkdtemp()
+        self.processor = DocumentProcessor()
+    
+    def teardown_method(self):
+        """Cleanup test environment"""
+        shutil.rmtree(self.temp_dir)
+    
+    def test_text_processing(self):
+        """Test basic text processing"""
+        # Create
         
