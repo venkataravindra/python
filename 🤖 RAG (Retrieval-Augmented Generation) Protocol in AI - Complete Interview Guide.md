@@ -892,4 +892,461 @@ if __name__ == "__main__":
     generator = ResponseGenerator()
     
     # Test basic generation
+    ```python
+    # Test basic generation
     test_context = """
+    System Requirements:
+    - Windows 10 or later / macOS 10.15 or later / Linux Ubuntu 18.04+
+    - 8GB RAM minimum, 16GB recommended
+    - 10GB free disk space
+    - Internet connection for activation
+    
+    Installation Steps:
+    1. Download the installer from our website
+    2. Run the installer as administrator
+    3. Follow the setup wizard
+    4. Enter your license key when prompted
+    5. Complete the installation
+    """
+    
+    test_query = "What are the system requirements for installation?"
+    
+    result = generator.generate_response(test_query, test_context)
+    print("Generated Response:")
+    print(result["response"])
+    print(f"\nTokens used: {result.get('total_tokens', 'N/A')}")
+    
+    # Test quality evaluation
+    quality = generator.evaluate_response_quality(test_query, result["response"], test_context)
+    print(f"\nQuality Metrics: {quality}")
+```
+
+### **8. RAG Pipeline (`src/rag_pipeline.py`)**
+
+```python
+# src/rag_pipeline.py
+import time
+from typing import Dict, List, Optional
+from loguru import logger
+
+from document_processor import DocumentProcessor
+from vector_store import VectorStore
+from retriever import DocumentRetriever
+from generator import ResponseGenerator
+from config import config
+
+class RAGPipeline:
+    """Complete RAG pipeline orchestrating all components"""
+    
+    def __init__(self, initialize_components: bool = True):
+        self.document_processor = None
+        self.vector_store = None
+        self.retriever = None
+        self.generator = None
+        
+        if initialize_components:
+            self._initialize_components()
+    
+    def _initialize_components(self):
+        """Initialize all RAG components"""
+        try:
+            logger.info("Initializing RAG pipeline components...")
+            
+            # Initialize document processor
+            self.document_processor = DocumentProcessor(
+                chunk_size=config.CHUNK_SIZE,
+                chunk_overlap=config.CHUNK_OVERLAP
+            )
+            
+            # Initialize vector store
+            self.vector_store = VectorStore()
+            
+            # Initialize retriever
+            self.retriever = DocumentRetriever(self.vector_store)
+            
+            # Initialize generator
+            self.generator = ResponseGenerator()
+            
+            logger.info("RAG pipeline components initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing RAG pipeline: {e}")
+            raise
+    
+    def ingest_documents(self, document_path: str, is_directory: bool = True) -> Dict[str, any]:
+        """Ingest documents into the RAG system"""
+        start_time = time.time()
+        
+        try:
+            logger.info(f"Starting document ingestion from: {document_path}")
+            
+            # Process documents
+            if is_directory:
+                chunks = self.document_processor.process_directory(document_path)
+            else:
+                chunks = self.document_processor.process_document(document_path)
+            
+            if not chunks:
+                return {
+                    "status": "error",
+                    "message": "No documents were processed",
+                    "chunks_processed": 0,
+                    "processing_time": time.time() - start_time
+                }
+            
+            # Add to vector store
+            success = self.vector_store.add_documents(chunks)
+            
+            processing_time = time.time() - start_time
+            
+            if success:
+                logger.info(f"Successfully ingested {len(chunks)} chunks in {processing_time:.2f} seconds")
+                return {
+                    "status": "success",
+                    "message": f"Successfully processed {len(chunks)} document chunks",
+                    "chunks_processed": len(chunks),
+                    "processing_time": processing_time
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": "Failed to add documents to vector store",
+                    "chunks_processed": len(chunks),
+                    "processing_time": processing_time
+                }
+                
+        except Exception as e:
+            logger.error(f"Error during document ingestion: {e}")
+            return {
+                "status": "error",
+                "message": f"Document ingestion failed: {str(e)}",
+                "chunks_processed": 0,
+                "processing_time": time.time() - start_time
+            }
+    
+    def query(
+        self, 
+        question: str, 
+        retrieval_strategy: str = "similarity",
+        prompt_type: str = "customer_support",
+        include_citations: bool = True,
+        top_k: int = None
+    ) -> Dict[str, any]:
+        """Process a query through the complete RAG pipeline"""
+        start_time = time.time()
+        
+        try:
+            logger.info(f"Processing query: {question}")
+            
+            # Step 1: Retrieve relevant documents
+            retrieved_docs = self.retriever.retrieve_documents(
+                question, 
+                top_k=top_k or config.TOP_K_DOCUMENTS,
+                strategy=retrieval_strategy
+            )
+            
+            if not retrieved_docs:
+                return {
+                    "status": "no_results",
+                    "question": question,
+                    "answer": "I couldn't find any relevant information to answer your question. Please try rephrasing your query or contact support for assistance.",
+                    "sources": [],
+                    "retrieval_time": time.time() - start_time,
+                    "generation_time": 0,
+                    "total_time": time.time() - start_time
+                }
+            
+            retrieval_time = time.time() - start_time
+            generation_start = time.time()
+            
+            # Step 2: Generate response
+            if include_citations:
+                result = self.generator.generate_with_citations(
+                    question, 
+                    retrieved_docs, 
+                    prompt_type
+                )
+            else:
+                context = self.retriever.get_context_for_generation(retrieved_docs)
+                result = self.generator.generate_response(
+                    question, 
+                    context, 
+                    prompt_type
+                )
+                result["sources"] = [
+                    {
+                        "number": i+1,
+                        "file_name": doc["metadata"].get("file_name", "Unknown"),
+                        "similarity_score": doc.get("similarity_score", 0)
+                    }
+                    for i, doc in enumerate(retrieved_docs)
+                ]
+            
+            generation_time = time.time() - generation_start
+            total_time = time.time() - start_time
+            
+            # Step 3: Evaluate response quality
+            if result["status"] == "success":
+                context = self.retriever.get_context_for_generation(retrieved_docs)
+                quality_metrics = self.generator.evaluate_response_quality(
+                    question, 
+                    result["response"], 
+                    context
+                )
+            else:
+                quality_metrics = {"overall": 0.0}
+            
+            # Compile final response
+            response = {
+                "status": result["status"],
+                "question": question,
+                "answer": result["response"],
+                "sources": result.get("sources", []),
+                "quality_metrics": quality_metrics,
+                "retrieval_strategy": retrieval_strategy,
+                "documents_retrieved": len(retrieved_docs),
+                "retrieval_time": retrieval_time,
+                "generation_time": generation_time,
+                "total_time": total_time,
+                "tokens_used": result.get("total_tokens", 0)
+            }
+            
+            if result["status"] == "error":
+                response["error"] = result.get("error", "Unknown error")
+            
+            logger.info(f"Query processed successfully in {total_time:.2f} seconds")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error processing query: {e}")
+            return {
+                "status": "error",
+                "question": question,
+                "answer": "I apologize, but I encountered an error while processing your question. Please try again later.",
+                "error": str(e),
+                "total_time": time.time() - start_time
+            }
+    
+    def get_system_stats(self) -> Dict[str, any]:
+        """Get system statistics and health information"""
+        try:
+            stats = {
+                "vector_store": self.vector_store.get_collection_stats() if self.vector_store else {},
+                "config": {
+                    "embedding_model": config.EMBEDDING_MODEL,
+                    "llm_model": config.LLM_MODEL,
+                    "chunk_size": config.CHUNK_SIZE,
+                    "top_k_documents": config.TOP_K_DOCUMENTS,
+                    "similarity_threshold": config.SIMILARITY_THRESHOLD
+                },
+                "status": "healthy"
+            }
+            return stats
+        except Exception as e:
+            logger.error(f"Error getting system stats: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    def reset_system(self) -> Dict[str, str]:
+        """Reset the entire RAG system (delete all data)"""
+        try:
+            if self.vector_store:
+                self.vector_store.delete_collection()
+            
+            # Reinitialize components
+            self._initialize_components()
+            
+            logger.info("RAG system reset successfully")
+            return {"status": "success", "message": "System reset successfully"}
+            
+        except Exception as e:
+            logger.error(f"Error resetting system: {e}")
+            return {"status": "error", "message": f"Reset failed: {str(e)}"}
+
+# Example usage and testing
+if __name__ == "__main__":
+    import os
+    from document_processor import create_sample_documents
+    
+    # Check for OpenAI API key
+    if not os.getenv("OPENAI_API_KEY"):
+        print("Please set OPENAI_API_KEY environment variable")
+        exit(1)
+    
+    # Initialize RAG pipeline
+    rag = RAGPipeline()
+    
+    # Create and ingest sample documents
+    create_sample_documents()
+    ingestion_result = rag.ingest_documents("./data/documents")
+    print("Ingestion Result:", ingestion_result)
+    
+    # Test queries
+    test_queries = [
+        "How do I install the software?",
+        "What are the system requirements?",
+        "How is billing calculated?",
+        "What API endpoints are available?",
+        "How do I cancel my subscription?"
+    ]
+    
+    print("\n" + "="*50)
+    print("TESTING RAG PIPELINE")
+    print("="*50)
+    
+    for query in test_queries:
+        print(f"\nQuery: {query}")
+        print("-" * 40)
+        
+        result = rag.query(query)
+        
+        print(f"Status: {result['status']}")
+        print(f"Answer: {result['answer']}")
+        print(f"Sources: {len(result.get('sources', []))} documents")
+        print(f"Quality Score: {result.get('quality_metrics', {}).get('overall', 0):.3f}")
+        print(f"Processing Time: {result['total_time']:.2f}s")
+        
+        if result.get('sources'):
+            print("Source Files:")
+            for source in result['sources'][:3]:  # Show top 3 sources
+                print(f"  - {source['file_name']} (similarity: {source['similarity_score']:.3f})")
+    
+    # System stats
+    print(f"\n{'='*50}")
+    print("SYSTEM STATISTICS")
+    print("="*50)
+    stats = rag.get_system_stats()
+    print(f"Total Documents: {stats['vector_store'].get('total_documents', 0)}")
+    print(f"Embedding Model: {stats['config']['embedding_model']}")
+    print(f"LLM Model: {stats['config']['llm_model']}")
+    print(f"System Status: {stats['status']}")
+```
+
+### **9. API Server (`src/api.py`)**
+
+```python
+# src/api.py
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict
+import uvicorn
+from loguru import logger
+
+from rag_pipeline import RAGPipeline
+from config import config
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="RAG System API",
+    description="Customer Support RAG System API",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize RAG pipeline
+rag_pipeline = RAGPipeline()
+
+# Pydantic models for API
+class QueryRequest(BaseModel):
+    question: str = Field(..., description="The question to ask")
+    retrieval_strategy: str = Field("similarity", description="Retrieval strategy: similarity, hybrid, or rerank")
+    prompt_type: str = Field("customer_support", description="Prompt type: customer_support, technical, or general")
+    include_citations: bool = Field(True, description="Whether to include source citations")
+    top_k: Optional[int] = Field(None, description="Number of documents to retrieve")
+
+class QueryResponse(BaseModel):
+    status: str
+    question: str
+    answer: str
+    sources: List[Dict]
+    quality_metrics: Dict
+    retrieval_strategy: str
+    documents_retrieved: int
+    retrieval_time: float
+    generation_time: float
+    total_time: float
+    tokens_used: int
+    error: Optional[str] = None
+
+class IngestionRequest(BaseModel):
+    document_path: str = Field(..., description="Path to document or directory")
+    is_directory: bool = Field(True, description="Whether the path is a directory")
+
+class IngestionResponse(BaseModel):
+    status: str
+    message: str
+    chunks_processed: int
+    processing_time: float
+
+class SystemStats(BaseModel):
+    vector_store: Dict
+    config: Dict
+    status: str
+
+# API Routes
+@app.get("/")
+async def root():
+    """Root endpoint with API information"""
+    return {
+        "message": "RAG System API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "query": "/query",
+            "ingest": "/ingest",
+            "stats": "/stats",
+            "health": "/health"
+        }
+    }
+
+@app.post("/query", response_model=QueryResponse)
+async def query_documents(request: QueryRequest):
+    """Query the RAG system"""
+    try:
+        logger.info(f"Received query: {request.question}")
+        
+        result = rag_pipeline.query(
+            question=request.question,
+            retrieval_strategy=request.retrieval_strategy,
+            prompt_type=request.prompt_type,
+            include_citations=request.include_citations,
+            top_k=request.top_k
+        )
+        
+        return QueryResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Error processing query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ingest", response_model=IngestionResponse)
+async def ingest_documents(request: IngestionRequest, background_tasks: BackgroundTasks):
+    """Ingest documents into the RAG system"""
+    try:
+        logger.info(f"Starting document ingestion: {request.document_path}")
+        
+        # For large document sets, you might want to run this in background
+        result = rag_pipeline.ingest_documents(
+            document_path=request.document_path,
+            is_directory=request.is_directory
+        )
+        
+        return IngestionResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Error during ingestion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/stats", response_model=SystemStats)
+async def get_system_stats():
+    """Get system statistics"""
+    try:
+        
